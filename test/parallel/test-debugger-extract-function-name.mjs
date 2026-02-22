@@ -10,23 +10,46 @@ import assert from 'assert';
 const cli = startCLI([fixtures.path('debugger', 'three-lines.js')]);
 
 try {
-  await cli.waitForInitialBreak();
+  await cli.waitFor(/Debugger attached\./);
   await cli.waitForPrompt();
-  await cli.command('exec a = function func() {}; a;');
+  cli.writeLine('exec a = function func() {}; a;', true);
+  await cli.waitFor(/\[Function: func\]/);
+  await cli.waitForPrompt();
   assert.match(cli.output, /\[Function: func\]/);
-  await cli.command('exec a = function func () {}; a;');
+
+  cli.writeLine('exec a = function func () {}; a;', true);
+  await cli.waitFor(/\[Function\]/);
+  await cli.waitForPrompt();
   assert.match(cli.output, /\[Function\]/);
-  await cli.command('exec a = function() {}; a;');
+
+  cli.writeLine('exec a = function() {}; a;', true);
+  await cli.waitFor(/\[Function: function\]/);
+  await cli.waitForPrompt();
   assert.match(cli.output, /\[Function: function\]/);
-  await cli.command('exec a = () => {}; a;');
+
+  cli.writeLine('exec a = () => {}; a;', true);
+  await cli.waitFor(/\[Function\]/);
+  await cli.waitForPrompt();
   assert.match(cli.output, /\[Function\]/);
-  await cli.command('exec a = function* func() {}; a;');
+
+  cli.writeLine('exec a = function* func() {}; a;', true);
+  await cli.waitFor(/\[GeneratorFunction: func\]/);
+  await cli.waitForPrompt();
   assert.match(cli.output, /\[GeneratorFunction: func\]/);
-  await cli.command('exec a = function *func() {}; a;');
+
+  cli.writeLine('exec a = function *func() {}; a;', true);
+  await cli.waitFor(/\[GeneratorFunction: \*func\]/);
+  await cli.waitForPrompt();
   assert.match(cli.output, /\[GeneratorFunction: \*func\]/);
-  await cli.command('exec a = function*func() {}; a;');
+
+  cli.writeLine('exec a = function*func() {}; a;', true);
+  await cli.waitFor(/\[GeneratorFunction: function\*func\]/);
+  await cli.waitForPrompt();
   assert.match(cli.output, /\[GeneratorFunction: function\*func\]/);
-  await cli.command('exec a = function * func() {}; a;');
+
+  cli.writeLine('exec a = function * func() {}; a;', true);
+  await cli.waitFor(/\[GeneratorFunction\]/);
+  await cli.waitForPrompt();
   assert.match(cli.output, /\[GeneratorFunction\]/);
 } finally {
   cli.quit();
