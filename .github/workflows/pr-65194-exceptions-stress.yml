@@ -29,13 +29,13 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           repository: nodejs/node
-          ref: 5f1ef0a9537626aa78154f89d30c2c9e5055b0aa
+          ref: 404b0cf364e548635f39c794e4a52ac9114eee4e
           persist-credentials: false
           path: node
 
       - name: Verify source revision
         env:
-          EXPECTED_SHA: 5f1ef0a9537626aa78154f89d30c2c9e5055b0aa
+          EXPECTED_SHA: 404b0cf364e548635f39c794e4a52ac9114eee4e
         run: |
           actual_sha="$(git -C node rev-parse HEAD)"
           echo "expected_sha=$EXPECTED_SHA"
