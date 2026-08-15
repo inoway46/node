@@ -29,13 +29,13 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           repository: nodejs/node
-          ref: 404b0cf364e548635f39c794e4a52ac9114eee4e
+          ref: 821e2675e3b9b6fd2359a829abeff034836c37ab
           persist-credentials: false
           path: node
 
       - name: Verify source revision
         env:
-          EXPECTED_SHA: 404b0cf364e548635f39c794e4a52ac9114eee4e
+          EXPECTED_SHA: 821e2675e3b9b6fd2359a829abeff034836c37ab
         run: |
           actual_sha="$(git -C node rev-parse HEAD)"
           echo "expected_sha=$EXPECTED_SHA"
@@ -90,7 +90,7 @@ jobs:
           done
 
           echo "Running ${#debugger_tests[@]} debugger tests x100 with -j16"
-          test "${#debugger_tests[@]}" -eq 78
+          test "${#debugger_tests[@]}" -eq 79
           python3 tools/test.py \
             --repeat 100 \
             -j 16 \
