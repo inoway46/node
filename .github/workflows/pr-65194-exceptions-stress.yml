@@ -1,4 +1,4 @@
-name: PR 65194 all debugger tests (pr-head)
+name: PR 65194 all debugger tests (pr-base)
 
 on:
   push:
@@ -15,7 +15,7 @@ env:
 
 jobs:
   stress-test:
-    name: pr-head-all-debugger
+    name: pr-base-all-debugger
     runs-on: macos-15
     env:
       CC: sccache gcc
@@ -25,17 +25,17 @@ jobs:
       LOG_DIR: ${{ github.workspace }}/workflow-logs
 
     steps:
-      - name: Check out pr-head
+      - name: Check out pr-base
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           repository: nodejs/node
-          ref: 821e2675e3b9b6fd2359a829abeff034836c37ab
+          ref: 404b0cf364e548635f39c794e4a52ac9114eee4e
           persist-credentials: false
           path: node
 
       - name: Verify source revision
         env:
-          EXPECTED_SHA: 821e2675e3b9b6fd2359a829abeff034836c37ab
+          EXPECTED_SHA: 404b0cf364e548635f39c794e4a52ac9114eee4e
         run: |
           actual_sha="$(git -C node rev-parse HEAD)"
           echo "expected_sha=$EXPECTED_SHA"
@@ -67,25 +67,56 @@ jobs:
       - name: Build
         run: make -C node build-ci -j2 V=1 CONFIG_FLAGS="--error-on-warn --v8-enable-temporal-support"
 
-      - name: Run all debugger tests x100 with 16 jobs
+      - name: Run all debugger tests x100
         shell: bash
         run: |
           set -o pipefail
           mkdir -p "$LOG_DIR"
           cd node
+
+          debugger_tests=()
+          for test_file in \
+            test/parallel/test-debugger-*.js \
+            test/parallel/test-debugger-*.mjs \
+            test/sequential/test-debugger-*.js \
+            test/sequential/test-debugger-*.mjs; do
+            test -e "$test_file" || continue
+            test "$test_file" = \
+              test/parallel/test-debugger-profile-command.js && continue
+            test_path="${test_file#test/}"
+            test_path="${test_path%.js}"
+            test_path="${test_path%.mjs}"
+            debugger_tests+=("$test_path")
+          done
+
+          echo "Running ${#debugger_tests[@]} debugger tests x100 with -j16"
+          test "${#debugger_tests[@]}" -eq 78
           python3 tools/test.py \
             --repeat 100 \
             -j 16 \
             -p actions \
             --report \
             --time \
-            'parallel/test-debugger-*' \
-            'sequential/test-debugger-*' \
-            2>&1 | tee "$LOG_DIR/all-debugger-tests.log"
+            "${debugger_tests[@]}" \
+            2>&1 | tee "$LOG_DIR/debugger-tests.log"
+          debugger_status=${PIPESTATUS[0]}
+
+          echo "Running test-debugger-profile-command x100 with -j1"
+          python3 tools/test.py \
+            --repeat 100 \
+            -j 1 \
+            -p actions \
+            --report \
+            --time \
+            parallel/test-debugger-profile-command \
+            2>&1 | tee "$LOG_DIR/debugger-profile-command.log"
+          profile_status=${PIPESTATUS[0]}
+
+          test "$debugger_status" -eq 0 && test "$profile_status" -eq 0
 
       - name: Upload stress-test log
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: pr-65194-all-debugger-pr-head
+          name: pr-65194-all-debugger-pr-base
           path: ${{ env.LOG_DIR }}
