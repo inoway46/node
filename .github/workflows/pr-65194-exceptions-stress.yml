@@ -1,4 +1,4 @@
-name: PR 65194 debugger exceptions stress (pr-head)
+name: PR 65194 debugger exceptions stress (pr-base)
 
 on:
   push:
@@ -15,7 +15,7 @@ env:
 
 jobs:
   stress-test:
-    name: pr-head
+    name: pr-base
     runs-on: macos-15
     env:
       CC: sccache gcc
@@ -25,17 +25,17 @@ jobs:
       LOG_DIR: ${{ github.workspace }}/workflow-logs
 
     steps:
-      - name: Check out pr-head
+      - name: Check out pr-base
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           repository: nodejs/node
-          ref: refs/pull/65194/head
+          ref: 5f1ef0a9537626aa78154f89d30c2c9e5055b0aa
           persist-credentials: false
           path: node
 
       - name: Verify source revision
         env:
-          EXPECTED_SHA: 821e2675e3b9b6fd2359a829abeff034836c37ab
+          EXPECTED_SHA: 5f1ef0a9537626aa78154f89d30c2c9e5055b0aa
         run: |
           actual_sha="$(git -C node rev-parse HEAD)"
           echo "expected_sha=$EXPECTED_SHA"
@@ -84,5 +84,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: pr-65194-exceptions-pr-head
+          name: pr-65194-exceptions-pr-base
           path: ${{ env.LOG_DIR }}
