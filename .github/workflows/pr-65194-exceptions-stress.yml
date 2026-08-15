@@ -1,0 +1,98 @@
+name: PR 65194 debugger exceptions stress comparison
+
+on:
+  push:
+    branches:
+      - stress/pr-65194-exceptions
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: '3.14'
+  XCODE_VERSION: '16.4'
+  RUSTC_VERSION: '1.86'
+
+jobs:
+  stress-test:
+    name: ${{ matrix.variant }}
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: pr-base
+            revision: 5f1ef0a9537626aa78154f89d30c2c9e5055b0aa
+            expected_sha: 5f1ef0a9537626aa78154f89d30c2c9e5055b0aa
+          - variant: pr-head
+            revision: refs/pull/65194/head
+            expected_sha: 821e2675e3b9b6fd2359a829abeff034836c37ab
+    env:
+      CC: sccache gcc
+      CXX: sccache g++
+      SCCACHE_GHA_ENABLED: 'true'
+      SCCACHE_IDLE_TIMEOUT: '0'
+      LOG_DIR: ${{ github.workspace }}/workflow-logs
+
+    steps:
+      - name: Check out ${{ matrix.variant }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: nodejs/node
+          ref: ${{ matrix.revision }}
+          persist-credentials: false
+          path: node
+
+      - name: Verify source revision
+        env:
+          EXPECTED_SHA: ${{ matrix.expected_sha }}
+        run: |
+          actual_sha="$(git -C node rev-parse HEAD)"
+          echo "expected_sha=$EXPECTED_SHA"
+          echo "actual_sha=$actual_sha"
+          test "$actual_sha" = "$EXPECTED_SHA"
+
+      - name: Set up Xcode ${{ env.XCODE_VERSION }}
+        run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
+
+      - name: Install Rust ${{ env.RUSTC_VERSION }}
+        run: |
+          rustup override set "$RUSTC_VERSION"
+          rustup --version
+
+      - name: Set up sccache
+        uses: Mozilla-Actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696  # v0.0.10
+        with:
+          version: v0.16.0
+
+      - name: Clean up runner disk
+        run: sudo rm -rf /Users/runner/Library/Android/sdk
+
+      - name: Build
+        run: make -C node build-ci -j"$(getconf _NPROCESSORS_ONLN)" V=1 CONFIG_FLAGS="--error-on-warn --v8-enable-temporal-support"
+
+      - name: Stress test debugger exceptions x1000 with 16 jobs
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$LOG_DIR"
+          cd node
+          python3 tools/test.py \
+            --repeat 1000 \
+            -j 16 \
+            -p actions \
+            parallel/test-debugger-exceptions \
+            2>&1 | tee "$LOG_DIR/stress-test.log"
+
+      - name: Upload stress-test log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pr-65194-exceptions-${{ matrix.variant }}
+          path: ${{ env.LOG_DIR }}
