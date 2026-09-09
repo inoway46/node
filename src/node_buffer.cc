@@ -1025,6 +1025,76 @@ int64_t IndexOfOffset(size_t length,
   }
 }
 
+// Search UTF-16LE string needles on two-byte boundaries relative to the start
+// of the Buffer view. Use the existing fast path when both inputs are aligned;
+// otherwise search bytes without making unaligned uint16_t accesses.
+size_t SearchUCS2String(const char* haystack,
+                        size_t haystack_length,
+                        const uint8_t* needle,
+                        size_t needle_length,
+                        size_t offset,
+                        bool is_forward) {
+  CHECK_EQ(haystack_length % sizeof(uint16_t), 0);
+  CHECK_EQ(needle_length % sizeof(uint16_t), 0);
+  CHECK_EQ(offset % sizeof(uint16_t), 0);
+  CHECK_GE(haystack_length, needle_length);
+
+  if (reinterpret_cast<uintptr_t>(haystack) % alignof(uint16_t) == 0 &&
+      reinterpret_cast<uintptr_t>(needle) % alignof(uint16_t) == 0) {
+    size_t result =
+        nbytes::SearchString(reinterpret_cast<const uint16_t*>(haystack),
+                             haystack_length / sizeof(uint16_t),
+                             reinterpret_cast<const uint16_t*>(needle),
+                             needle_length / sizeof(uint16_t),
+                             offset / sizeof(uint16_t),
+                             is_forward);
+    return result * sizeof(uint16_t);
+  }
+
+  size_t anchor = 0;
+  for (size_t i = 1; i < needle_length; i++) {
+    if (needle[i] > needle[anchor]) anchor = i;
+  }
+
+  const uint8_t anchor_byte = needle[anchor];
+  const size_t last_candidate = haystack_length - needle_length;
+  if (is_forward) {
+    size_t search_offset = offset + anchor;
+    const size_t search_end = last_candidate + anchor + 1;
+    while (search_offset < search_end) {
+      const void* found = memchr(
+          haystack + search_offset, anchor_byte, search_end - search_offset);
+      if (found == nullptr) return haystack_length;
+
+      const size_t raw_offset = static_cast<const char*>(found) - haystack;
+      search_offset = raw_offset + 1;
+      const size_t candidate = raw_offset - anchor;
+      if (candidate % sizeof(uint16_t) == 0 &&
+          memcmp(haystack + candidate, needle, needle_length) == 0) {
+        return candidate;
+      }
+    }
+  } else {
+    const size_t first_candidate = std::min(offset, last_candidate);
+    size_t search_end = first_candidate + anchor + 1;
+    while (search_end > anchor) {
+      const void* found = nbytes::stringsearch::MemrchrFill(
+          haystack + anchor, anchor_byte, search_end - anchor);
+      if (found == nullptr) return haystack_length;
+
+      const size_t raw_offset = static_cast<const char*>(found) - haystack;
+      search_end = raw_offset;
+      const size_t candidate = raw_offset - anchor;
+      if (candidate % sizeof(uint16_t) == 0 &&
+          memcmp(haystack + candidate, needle, needle_length) == 0) {
+        return candidate;
+      }
+    }
+  }
+
+  return haystack_length;
+}
+
 void IndexOfString(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
   Isolate* isolate = env->isolate();
@@ -1086,6 +1156,16 @@ void IndexOfString(const FunctionCallbackInfo<Value>& args) {
   } else if (is_forward && offset >= search_end) {
     return args.GetReturnValue().Set(-1);
   }
+  if (enc == UCS2) {
+    // The start limits the search range but does not change the view's
+    // code-unit alignment.
+    if (is_forward) {
+      offset += offset % sizeof(uint16_t);
+      if (offset >= search_end) return args.GetReturnValue().Set(-1);
+    } else {
+      offset -= offset % sizeof(uint16_t);
+    }
+  }
   CHECK_LT(offset, haystack_length);
   if ((is_forward && needle_length + offset > search_end) ||
       needle_length > search_end) {
@@ -1109,21 +1189,22 @@ void IndexOfString(const FunctionCallbackInfo<Value>& args) {
       if (decoded_string == nullptr)
         return args.GetReturnValue().Set(-1);
 
-      result = nbytes::SearchString(reinterpret_cast<const uint16_t*>(haystack),
-                                    search_end / 2,
-                                    decoded_string,
-                                    decoder.size() / 2,
-                                    offset / 2,
-                                    is_forward);
+      result =
+          SearchUCS2String(haystack,
+                           search_end,
+                           reinterpret_cast<const uint8_t*>(decoded_string),
+                           decoder.size(),
+                           offset,
+                           is_forward);
     } else {
-      result = nbytes::SearchString(reinterpret_cast<const uint16_t*>(haystack),
-                                    search_end / 2,
-                                    needle_value.out(),
-                                    needle_value.length(),
-                                    offset / 2,
-                                    is_forward);
+      result =
+          SearchUCS2String(haystack,
+                           search_end,
+                           reinterpret_cast<const uint8_t*>(needle_value.out()),
+                           needle_value.length() * sizeof(uint16_t),
+                           offset,
+                           is_forward);
     }
-    result *= 2;
   } else if (enc == UTF8) {
     Utf8Value needle_value(isolate, needle);
     if (*needle_value == nullptr)

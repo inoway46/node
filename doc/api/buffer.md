@@ -2215,6 +2215,13 @@ If `value` is:
 * a number, `value` will be interpreted as an unsigned 8-bit integer
   value between `0` and `255`.
 
+When `value` is a string and `encoding` is `'utf16le'`, `'utf-16le'`,
+`'ucs2'`, or `'ucs-2'`, matches begin only at even byte offsets relative to
+the start of `buf`. The `start` and `end` parameters limit the search range but
+do not change those boundaries. A subarray is a separate view whose boundaries
+begin at its index `0`. To search for the encoded bytes at any byte offset, pass
+a `Buffer` value without an `encoding` argument instead.
+
 ```mjs
 import { Buffer } from 'node:buffer';
 
