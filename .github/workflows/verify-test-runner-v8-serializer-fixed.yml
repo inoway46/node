@@ -1,0 +1,234 @@
+name: Verify test runner V8 serializer fixed on Windows
+
+on:
+  push:
+    branches:
+      - verify-test-runner-v8-serializer-fixed
+
+permissions:
+  contents: read
+
+env:
+  BASE_COMMIT: 71b8b174857e25106d39b61a9e6f30d927da8b01
+  FIX_COMMIT: de0cc63155b7ad91e4b631e0bddcd2170442b060
+  ITERATIONS: '300'
+  PYTHON_VERSION: '3.14'
+  VARIANT: fixed
+
+jobs:
+  stress:
+    name: fixed / Windows / Node.js v24.20.0
+    runs-on: windows-2025
+    timeout-minutes: 330
+
+    steps:
+      - name: Check out Node.js v24.20.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: nodejs/node
+          ref: ${{ env.BASE_COMMIT }}
+          path: node
+          persist-credentials: false
+
+      - name: Fetch and apply the fix
+        shell: bash
+        run: |
+          git -C node fetch --no-tags --depth=2 \
+            https://github.com/inoway46/node.git \
+            fix-test-runner-v8-serializer-reuse
+          test "$(git -C node rev-parse FETCH_HEAD)" = "$FIX_COMMIT"
+
+          git -C node diff "${FIX_COMMIT}^" "$FIX_COMMIT" -- \
+            lib/internal/test_runner/reporter/v8-serializer.js \
+            test/parallel/test-runner-v8-deserializer.mjs | git -C node apply -
+
+          git -C node diff --check
+          git -C node diff --stat
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install build dependencies
+        run: choco install nasm --no-progress -y
+
+      - name: Build Node.js
+        working-directory: node
+        run: ./vcbuild.bat release vs2026
+
+      - name: Verify the deterministic regression
+        working-directory: node
+        shell: pwsh
+        run: |
+          python tools/test.py -p actions `
+            parallel/test-runner-v8-deserializer *> regression-test.log
+          $status = $LASTEXITCODE
+          Get-Content regression-test.log
+
+          if ($env:VARIANT -eq 'base') {
+            if ($status -eq 0) {
+              throw 'The regression test unexpectedly passed with the base implementation.'
+            }
+            if (-not (Select-String -Path regression-test.log `
+                        -SimpleMatch 'Unable to deserialize cloned data.' `
+                        -Quiet)) {
+              throw 'The base implementation failed with an unexpected signature.'
+            }
+          } elseif ($status -ne 0) {
+            throw 'The regression test failed with the fixed implementation.'
+          }
+
+      - name: Check out the external stress fixture
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: dirkwa/signalk-container
+          ref: stress-node65756
+          path: fixture
+          persist-credentials: false
+
+      - name: Set up Node.js for fixture dependencies
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: 24.20.0
+
+      - name: Install and build the stress fixture
+        working-directory: fixture
+        run: |
+          npm install
+          npm run build:server
+
+      - name: Write the stress driver
+        shell: bash
+        run: |
+          cat > fixture/stress-driver.mjs <<'EOF'
+          import { spawnSync } from 'node:child_process';
+          import {
+            copyFileSync,
+            existsSync,
+            mkdirSync,
+            readFileSync,
+            writeFileSync,
+          } from 'node:fs';
+
+          const iteration = Number(process.argv[2]);
+          const outputDirectory = 'stress-logs';
+          const specPath = `${outputDirectory}/run-${iteration}.spec.log`;
+          const junitPath = `${outputDirectory}/run-${iteration}.junit.xml`;
+
+          mkdirSync(outputDirectory, { recursive: true });
+
+          const result = spawnSync(process.execPath, [
+            '--test',
+            '--test-concurrency=1',
+            '--test-reporter=spec',
+            `--test-reporter-destination=${specPath}`,
+            '--test-reporter=junit',
+            `--test-reporter-destination=${junitPath}`,
+            'dist/test/*.test.js',
+          ], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+
+          writeFileSync(
+            `${outputDirectory}/run-${iteration}.stdout.log`,
+            result.stdout ?? Buffer.alloc(0),
+          );
+          writeFileSync(
+            `${outputDirectory}/run-${iteration}.stderr.log`,
+            result.stderr ?? Buffer.alloc(0),
+          );
+
+          const junit = existsSync(junitPath) ? readFileSync(junitPath, 'utf8') : '';
+          const childExitCodes = Array.from(
+            junit.matchAll(/exitCode: (-?\d+)/g),
+            (match) => Number(match[1]),
+          );
+          const childSignals = Array.from(
+            junit.matchAll(/signal: '([A-Z0-9]+)'/g),
+            (match) => match[1],
+          );
+          const abnormalStatus = result.status !== 0 && result.status !== 1;
+          const hit = result.signal !== null ||
+            abnormalStatus ||
+            childExitCodes.length > 0 ||
+            childSignals.length > 0;
+          const summary = {
+            iteration,
+            status: result.status,
+            signal: result.signal,
+            error: result.error?.message ?? null,
+            childExitCodes,
+            childSignals,
+            hit,
+          };
+
+          if (hit) {
+            for (const path of [specPath, junitPath]) {
+              if (existsSync(path)) {
+                copyFileSync(path, path.replace('/run-', '/HIT-run-'));
+              }
+            }
+            for (const stream of ['stdout', 'stderr']) {
+              const path = `${outputDirectory}/run-${iteration}.${stream}.log`;
+              copyFileSync(path, path.replace('/run-', '/HIT-run-'));
+            }
+          }
+
+          writeFileSync(
+            `${outputDirectory}/result-${iteration}.json`,
+            `${JSON.stringify(summary, null, 2)}\n`,
+          );
+          console.log(`STRESS_RESULT ${JSON.stringify(summary)}`);
+          EOF
+
+      - name: Run the Windows stress test
+        shell: pwsh
+        run: |
+          $customNode = (Resolve-Path node/Release/node.exe).Path
+          & $customNode -p "JSON.stringify({ `
+            execPath: process.execPath, `
+            version: process.version, `
+            v8: process.versions.v8 `
+          })"
+
+          Push-Location fixture
+          $hits = 0
+          for ($iteration = 1; $iteration -le [int]$env:ITERATIONS; $iteration++) {
+            & $customNode stress-driver.mjs $iteration
+            if ($LASTEXITCODE -ne 0) {
+              throw "The stress driver failed in iteration $iteration."
+            }
+
+            $result = Get-Content "stress-logs/result-$iteration.json" `
+              -Raw | ConvertFrom-Json
+            if ($result.hit) {
+              $hits++
+            }
+          }
+
+          $summary = [ordered]@{
+            variant = $env:VARIANT
+            baseCommit = $env:BASE_COMMIT
+            fixCommit = $env:FIX_COMMIT
+            iterations = [int]$env:ITERATIONS
+            hits = $hits
+          }
+          $summary | ConvertTo-Json | Set-Content stress-summary.json
+          $summary | ConvertTo-Json
+          "### $env:VARIANT: $hits hit(s) in $env:ITERATIONS runs" |
+            Add-Content $env:GITHUB_STEP_SUMMARY
+          Pop-Location
+
+      - name: Upload A/B logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: node-65756-fixed-windows-v24.20.0
+          path: |
+            node/regression-test.log
+            fixture/stress-logs/result-*.json
+            fixture/stress-logs/HIT-*
+            fixture/stress-summary.json
+          retention-days: 30
+          if-no-files-found: warn
