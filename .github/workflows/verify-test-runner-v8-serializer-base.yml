@@ -1,0 +1,169 @@
+name: Verify test runner V8 serializer base on Windows
+
+on:
+  push:
+    branches:
+      - verify-test-runner-v8-serializer-base
+
+permissions:
+  contents: read
+
+env:
+  ITERATIONS: '300'
+  NODE_VERSION: 24.20.0
+
+jobs:
+  stress:
+    name: base / Windows / Node.js v24.20.0
+    runs-on: windows-2025
+    timeout-minutes: 330
+
+    steps:
+      - name: Check out the external stress fixture
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: dirkwa/signalk-container
+          ref: stress-node65756
+          path: fixture
+          persist-credentials: false
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install and build the stress fixture
+        working-directory: fixture
+        run: |
+          npm install
+          npm run build:server
+
+      - name: Write the stress driver
+        shell: bash
+        run: |
+          cat > fixture/stress-driver.mjs <<'EOF'
+          import { spawnSync } from 'node:child_process';
+          import {
+            copyFileSync,
+            existsSync,
+            mkdirSync,
+            readFileSync,
+            writeFileSync,
+          } from 'node:fs';
+
+          const iteration = Number(process.argv[2]);
+          const outputDirectory = 'stress-logs';
+          const specPath = `${outputDirectory}/run-${iteration}.spec.log`;
+          const junitPath = `${outputDirectory}/run-${iteration}.junit.xml`;
+
+          mkdirSync(outputDirectory, { recursive: true });
+
+          const result = spawnSync(process.execPath, [
+            '--test',
+            '--test-concurrency=1',
+            '--test-reporter=spec',
+            `--test-reporter-destination=${specPath}`,
+            '--test-reporter=junit',
+            `--test-reporter-destination=${junitPath}`,
+            'dist/test/*.test.js',
+          ], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+
+          writeFileSync(
+            `${outputDirectory}/run-${iteration}.stdout.log`,
+            result.stdout ?? Buffer.alloc(0),
+          );
+          writeFileSync(
+            `${outputDirectory}/run-${iteration}.stderr.log`,
+            result.stderr ?? Buffer.alloc(0),
+          );
+
+          const junit = existsSync(junitPath) ? readFileSync(junitPath, 'utf8') : '';
+          const childExitCodes = Array.from(
+            junit.matchAll(/exitCode: (-?\d+)/g),
+            (match) => Number(match[1]),
+          );
+          const childSignals = Array.from(
+            junit.matchAll(/signal: '([A-Z0-9]+)'/g),
+            (match) => match[1],
+          );
+          const abnormalStatus = result.status !== 0 && result.status !== 1;
+          const hit = result.signal !== null ||
+            abnormalStatus ||
+            childExitCodes.length > 0 ||
+            childSignals.length > 0;
+          const summary = {
+            iteration,
+            status: result.status,
+            signal: result.signal,
+            error: result.error?.message ?? null,
+            childExitCodes,
+            childSignals,
+            hit,
+          };
+
+          if (hit) {
+            for (const path of [specPath, junitPath]) {
+              if (existsSync(path)) {
+                copyFileSync(path, path.replace('/run-', '/HIT-run-'));
+              }
+            }
+            for (const stream of ['stdout', 'stderr']) {
+              const path = `${outputDirectory}/run-${iteration}.${stream}.log`;
+              copyFileSync(path, path.replace('/run-', '/HIT-run-'));
+            }
+          }
+
+          writeFileSync(
+            `${outputDirectory}/result-${iteration}.json`,
+            `${JSON.stringify(summary, null, 2)}\n`,
+          );
+          console.log(`STRESS_RESULT ${JSON.stringify(summary)}`);
+          EOF
+
+      - name: Run the Windows stress test
+        working-directory: fixture
+        shell: pwsh
+        run: |
+          node -p "JSON.stringify({ `
+            execPath: process.execPath, `
+            version: process.version, `
+            v8: process.versions.v8 `
+          })"
+
+          $hits = 0
+          for ($iteration = 1; $iteration -le [int]$env:ITERATIONS; $iteration++) {
+            node stress-driver.mjs $iteration
+            if ($LASTEXITCODE -ne 0) {
+              throw "The stress driver failed in iteration $iteration."
+            }
+
+            $result = Get-Content "stress-logs/result-$iteration.json" `
+              -Raw | ConvertFrom-Json
+            if ($result.hit) {
+              $hits++
+            }
+          }
+
+          $summary = [ordered]@{
+            nodeVersion = $env:NODE_VERSION
+            iterations = [int]$env:ITERATIONS
+            hits = $hits
+          }
+          $summary | ConvertTo-Json | Set-Content stress-summary.json
+          $summary | ConvertTo-Json
+          "### Node.js $env:NODE_VERSION: $hits hit(s) in $env:ITERATIONS runs" |
+            Add-Content $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload A/B logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: node-65756-base-windows-v24.20.0
+          path: |
+            fixture/stress-logs/result-*.json
+            fixture/stress-logs/HIT-*
+            fixture/stress-summary.json
+          retention-days: 30
+          if-no-files-found: warn
