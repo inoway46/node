@@ -15,7 +15,8 @@ env:
   NODE_VERSION: v24.20.0
   NODE_BASE_SHA: 71b8b174857e25106d39b61a9e6f30d927da8b01
   FIX_COMMIT: c909c63be392b4c9ffdc2108e64371b9fa83e472
-  NODE_SOURCE_SHA: ${{ github.sha }}
+  NODE_SOURCE_SHA: ee62aabfcc98c5330a6bd8d55607cdb32b3aea4e
+  PYTHON_VERSION: '3.14'
   TARGET_TEST: dist/test/*.test.js
 
 jobs:
@@ -27,23 +28,37 @@ jobs:
       - name: Check out the fixed source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          repository: inoway46/node
+          ref: ${{ env.NODE_SOURCE_SHA }}
           persist-credentials: false
           fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install build dependencies
+        run: choco install nasm --no-progress -y
 
       - name: Record source and toolchain
         shell: pwsh
         run: |
+          if ((git rev-parse HEAD) -ne $env:NODE_SOURCE_SHA) { throw 'Unexpected source SHA' }
           git rev-parse HEAD | Set-Content source-sha.txt
           git diff $env:NODE_BASE_SHA HEAD -- src test/cctest | Set-Content applied-fix.patch
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
           & $vswhere -products * -format json | Set-Content visual-studio.json
           python --version
           nasm -v
-          "vcbuild.bat release x64 vs2022 cctest" | Set-Content build-command.txt
+          "vcbuild.bat release x64 vs2026 cctest" | Set-Content build-command.txt
 
       - name: Build Node.js and cctest
-        shell: cmd
-        run: vcbuild.bat release x64 vs2022 cctest
+        shell: pwsh
+        run: |
+          ./vcbuild.bat release x64 vs2026 cctest
+          if ($LASTEXITCODE -ne 0) { throw 'Node.js build failed' }
+          if (-not (Test-Path Release/node.exe)) { throw 'Build did not produce node.exe' }
 
       - name: Verify and record build products
         shell: pwsh
