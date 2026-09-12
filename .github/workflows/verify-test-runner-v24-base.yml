@@ -1,0 +1,636 @@
+name: Verify Node.js v24 base without cppgc Realm fix
+
+on:
+  push:
+    branches:
+      - codex/verify-65756-v24-base
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  _NO_DEBUG_HEAP: '1'
+  FIXTURE_COMMIT: 9f10b6ec46f954747f1df80b3e47db8fb39d3db7
+  MAX_ITERATIONS: '300'
+  NODE_VERSION: v24.20.0
+  NODE_BASE_SHA: 71b8b174857e25106d39b61a9e6f30d927da8b01
+  VARIANT: base
+  NODE_SOURCE_SHA: 71b8b174857e25106d39b61a9e6f30d927da8b01
+  REFERENCE_LOCK_SHA256: 6ca52af74939c910661c78a0a3c0909bc212d80a9a9c5da0bf6f26d1966c1165
+  PYTHON_VERSION: '3.14'
+  TARGET_TEST: dist/test/*.test.js
+
+jobs:
+  build:
+    name: Build v24.20.0 base / Windows x64
+    runs-on: windows-2025
+    timeout-minutes: 180
+    steps:
+      - name: Check out the base source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: inoway46/node
+          ref: ${{ env.NODE_SOURCE_SHA }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install build dependencies
+        run: choco install nasm --no-progress -y
+
+      - name: Record source and toolchain
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -ne $env:NODE_SOURCE_SHA) { throw 'Unexpected source SHA' }
+          git rev-parse HEAD | Set-Content source-sha.txt
+          git diff $env:NODE_BASE_SHA HEAD -- src test/cctest | Set-Content applied-fix.patch
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          & $vswhere -products * -format json | Set-Content visual-studio.json
+          python --version
+          nasm -v
+          "vcbuild.bat release x64 vs2026 no-cctest" | Set-Content build-command.txt
+
+      - name: Build Node.js
+        shell: pwsh
+        run: |
+          ./vcbuild.bat release x64 vs2026 no-cctest
+          if ($LASTEXITCODE -ne 0) { throw 'Node.js build failed' }
+          if (-not (Test-Path Release/node.exe)) { throw 'Build did not produce node.exe' }
+
+      - name: Verify and record build products
+        shell: pwsh
+        run: |
+          $files = @('Release/node.exe', 'Release/node.pdb')
+          $records = @($files | ForEach-Object {
+            if (-not (Test-Path $_)) { throw "Missing build product: $_" }
+            [ordered]@{
+              file = $_
+              sha256 = (Get-FileHash $_ -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+          })
+          $records | ConvertTo-Json | Set-Content build-hashes.json
+          & ./Release/node.exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'Built Node.js failed to start' }
+
+      - name: Save build metadata
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: node-65756-v24-base-build-evidence-attempt-${{ github.run_attempt }}
+          path: |
+            source-sha.txt
+            applied-fix.patch
+            visual-studio.json
+            build-command.txt
+            build-hashes.json
+          retention-days: 30
+
+      - name: Save reusable Windows build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: node-65756-v24-base-windows-x64
+          path: |
+            Release/node.exe
+            Release/node.pdb
+            build-hashes.json
+          retention-days: 30
+
+  capture:
+    needs: build
+    name: v24.20.0 base / full-suite stress
+    runs-on: windows-2025
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out the pinned stress fixture
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: dirkwa/signalk-container
+          ref: ${{ env.FIXTURE_COMMIT }}
+          path: fixture
+          persist-credentials: false
+
+      - name: Set up fixture npm
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: 24.20.0
+
+      - name: Download the base Windows build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: node-65756-v24-base-windows-x64
+          path: base-build
+
+      - name: Select the base Node.js binary
+        shell: pwsh
+        run: |
+          $hashes = Get-Content base-build/build-hashes.json -Raw | ConvertFrom-Json
+          $nodeRecord = $hashes | Where-Object file -eq 'Release/node.exe'
+          "NODE_EXE_SHA256=$($nodeRecord.sha256)" >> $env:GITHUB_ENV
+          (Resolve-Path base-build/Release).Path >> $env:GITHUB_PATH
+
+      - name: Verify Node.js
+        shell: pwsh
+        run: |
+          $nodeExe = (Get-Command node).Source
+          $actualHash = (Get-FileHash $nodeExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:NODE_EXE_SHA256) {
+            throw "Unexpected node.exe SHA-256: $actualHash"
+          }
+
+          if ((node --version) -ne $env:NODE_VERSION) { throw 'Unexpected Node.js version' }
+          "Node source: $env:NODE_SOURCE_SHA; node.exe SHA-256: $actualHash"
+          $dumpDirectory = Join-Path $env:RUNNER_TEMP 'node-crash-dumps'
+          New-Item -ItemType Directory -Path $dumpDirectory -Force | Out-Null
+          "DUMP_DIRECTORY=$dumpDirectory" >> $env:GITHUB_ENV
+          "TARGET_NODE_EXE=$nodeExe" >> $env:GITHUB_ENV
+
+      - name: Build and verify the dump monitor
+        shell: pwsh
+        run: |
+          $monitorSource = Join-Path $env:RUNNER_TEMP 'dump-monitor.cc'
+          $monitorExe = Join-Path $env:RUNNER_TEMP 'dump-monitor.exe'
+          $probeSource = Join-Path $env:RUNNER_TEMP 'crash-probe.c'
+          $probeExe = Join-Path $env:RUNNER_TEMP 'crash-probe.exe'
+          @'
+          #include <windows.h>
+          #include <dbghelp.h>
+
+          #include <cstdio>
+          #include <string>
+          #include <vector>
+
+          static std::wstring QuoteArgument(const wchar_t* argument) {
+            const std::wstring value(argument);
+            std::wstring quoted(L"\"");
+            size_t backslashes = 0;
+            for (const wchar_t character : value) {
+              if (character == L'\\') {
+                backslashes++;
+              } else if (character == L'"') {
+                quoted.append(backslashes * 2 + 1, L'\\');
+                quoted.push_back(character);
+                backslashes = 0;
+              } else {
+                quoted.append(backslashes, L'\\');
+                quoted.push_back(character);
+                backslashes = 0;
+              }
+            }
+            quoted.append(backslashes * 2, L'\\');
+            quoted.push_back(L'"');
+            return quoted;
+          }
+
+          static bool WriteDump(const std::wstring& directory,
+                                const DEBUG_EVENT& event) {
+            HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION |
+                                             PROCESS_VM_READ |
+                                             PROCESS_DUP_HANDLE,
+                                         FALSE, event.dwProcessId);
+            if (process == nullptr) {
+              fwprintf(stderr, L"OpenProcess failed: %lu\n", GetLastError());
+              return false;
+            }
+
+            SYSTEMTIME time;
+            GetSystemTime(&time);
+            wchar_t path[MAX_PATH];
+            swprintf_s(path,
+                       L"%ls\\node-%lu-%04u%02u%02u-%02u%02u%02u.dmp",
+                       directory.c_str(), event.dwProcessId,
+                       time.wYear, time.wMonth, time.wDay,
+                       time.wHour, time.wMinute, time.wSecond);
+
+            HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, nullptr,
+                                      CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file == INVALID_HANDLE_VALUE) {
+              fwprintf(stderr, L"CreateFileW failed: %lu\n", GetLastError());
+              CloseHandle(process);
+              return false;
+            }
+
+            HANDLE thread = OpenThread(THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
+                                       FALSE, event.dwThreadId);
+            CONTEXT context{};
+            context.ContextFlags = CONTEXT_ALL;
+            if (thread == nullptr || !GetThreadContext(thread, &context)) {
+              fwprintf(stderr, L"GetThreadContext failed: %lu\n", GetLastError());
+              if (thread != nullptr) CloseHandle(thread);
+              CloseHandle(file);
+              CloseHandle(process);
+              return false;
+            }
+
+            EXCEPTION_RECORD record = event.u.Exception.ExceptionRecord;
+            EXCEPTION_POINTERS pointers{&record, &context};
+            MINIDUMP_EXCEPTION_INFORMATION exception{};
+            exception.ThreadId = event.dwThreadId;
+            exception.ExceptionPointers = &pointers;
+            exception.ClientPointers = FALSE;
+
+            const MINIDUMP_TYPE type = static_cast<MINIDUMP_TYPE>(
+                MiniDumpWithFullMemory |
+                MiniDumpWithHandleData |
+                MiniDumpWithUnloadedModules |
+                MiniDumpWithFullMemoryInfo |
+                MiniDumpWithThreadInfo |
+                MiniDumpWithTokenInformation);
+            const BOOL written = MiniDumpWriteDump(
+                process, event.dwProcessId, file, type, &exception, nullptr, nullptr);
+            if (!written) {
+              fwprintf(stderr, L"MiniDumpWriteDump failed: %lu\n", GetLastError());
+            } else {
+              fwprintf(stdout, L"DUMP_WRITTEN %ls\n", path);
+            }
+
+            CloseHandle(thread);
+            CloseHandle(file);
+            CloseHandle(process);
+            return written == TRUE;
+          }
+
+          int wmain(int argc, wchar_t* argv[]) {
+            if (argc < 3) {
+              fwprintf(stderr, L"Usage: dump-monitor <directory> <program> [args...]\n");
+              return 2;
+            }
+
+            std::wstring command;
+            for (int index = 2; index < argc; index++) {
+              if (!command.empty()) command.push_back(L' ');
+              command.append(QuoteArgument(argv[index]));
+            }
+            std::vector<wchar_t> mutable_command(command.begin(), command.end());
+            mutable_command.push_back(L'\0');
+
+            STARTUPINFOW startup{};
+            startup.cb = sizeof(startup);
+            startup.dwFlags = STARTF_USESTDHANDLES;
+            startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+            startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+            startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+            PROCESS_INFORMATION process_info{};
+            if (!CreateProcessW(argv[2], mutable_command.data(), nullptr, nullptr, TRUE,
+                                DEBUG_PROCESS | CREATE_UNICODE_ENVIRONMENT,
+                                nullptr, nullptr, &startup, &process_info)) {
+              fwprintf(stderr, L"CreateProcessW failed: %lu\n", GetLastError());
+              return 3;
+            }
+
+            const DWORD root_process_id = process_info.dwProcessId;
+            CloseHandle(process_info.hThread);
+            CloseHandle(process_info.hProcess);
+
+            DWORD root_exit_code = 1;
+            bool dump_written = false;
+            bool dump_failed = false;
+            bool root_exited = false;
+            while (!root_exited) {
+              DEBUG_EVENT event{};
+              if (!WaitForDebugEvent(&event, INFINITE)) {
+                fwprintf(stderr, L"WaitForDebugEvent failed: %lu\n", GetLastError());
+                return 4;
+              }
+
+              DWORD continue_status = DBG_CONTINUE;
+              switch (event.dwDebugEventCode) {
+                case CREATE_PROCESS_DEBUG_EVENT:
+                  if (event.u.CreateProcessInfo.hFile != nullptr) {
+                    CloseHandle(event.u.CreateProcessInfo.hFile);
+                  }
+                  break;
+                case CREATE_THREAD_DEBUG_EVENT:
+                  CloseHandle(event.u.CreateThread.hThread);
+                  break;
+                case LOAD_DLL_DEBUG_EVENT:
+                  if (event.u.LoadDll.hFile != nullptr) CloseHandle(event.u.LoadDll.hFile);
+                  break;
+                case EXCEPTION_DEBUG_EVENT: {
+                  const DWORD code = event.u.Exception.ExceptionRecord.ExceptionCode;
+                  const bool first_chance = event.u.Exception.dwFirstChance != 0;
+                  fwprintf(stdout, L"DEBUG_EXCEPTION pid=%lu code=0x%08lx first=%d\n",
+                           event.dwProcessId, code, first_chance ? 1 : 0);
+                  if (!first_chance && !dump_written) {
+                    if (!WriteDump(argv[1], event)) {
+                      dump_failed = true;
+                    } else {
+                      dump_written = true;
+                    }
+                  }
+                  continue_status = DBG_EXCEPTION_NOT_HANDLED;
+                  break;
+                }
+                case EXIT_PROCESS_DEBUG_EVENT:
+                  if (event.dwProcessId == root_process_id) {
+                    root_exit_code = event.u.ExitProcess.dwExitCode;
+                    root_exited = true;
+                  }
+                  break;
+              }
+
+              if (!ContinueDebugEvent(event.dwProcessId, event.dwThreadId,
+                                      continue_status)) {
+                fwprintf(stderr, L"ContinueDebugEvent failed: %lu\n", GetLastError());
+                return 5;
+              }
+            }
+
+            if (dump_failed) return 125;
+            return static_cast<int>(root_exit_code);
+          }
+          '@ | Set-Content -Path $monitorSource -Encoding ascii
+
+          @'
+          #include <windows.h>
+
+          int main(void) {
+            SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
+                         SEM_NOOPENFILEERRORBOX);
+            *((volatile int*) 0) = 1;
+            return 0;
+          }
+          '@ | Set-Content -Path $probeSource -Encoding ascii
+
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} `
+            'Microsoft Visual Studio\Installer\vswhere.exe'
+          $visualStudio = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if ([string]::IsNullOrWhiteSpace($visualStudio)) {
+            throw 'Visual Studio with the x64 C++ toolchain was not found.'
+          }
+
+          $vsDevCmd = Join-Path $visualStudio 'Common7\Tools\VsDevCmd.bat'
+          $compileCommand = "call `"$vsDevCmd`" -no_logo -arch=x64 && " +
+            "cl.exe /nologo /EHsc /std:c++17 /Fe:`"$monitorExe`" " +
+            "`"$monitorSource`" /link dbghelp.lib && " +
+            "cl.exe /nologo /Od /Fe:`"$probeExe`" `"$probeSource`""
+          & $env:ComSpec /d /s /c $compileCommand
+          if ($LASTEXITCODE -ne 0) {
+            throw "The crash probe failed to compile with exit code $LASTEXITCODE."
+          }
+
+          & $monitorExe $env:DUMP_DIRECTORY $probeExe
+          $monitorExitCode = $LASTEXITCODE
+          $global:LASTEXITCODE = 0
+          "Native dump monitor smoke exit code: $monitorExitCode"
+
+          $probeDumps = @()
+          for ($attempt = 1; $attempt -le 30; $attempt++) {
+            $probeDumps = @(Get-ChildItem $env:DUMP_DIRECTORY -Filter '*.dmp' `
+              -File -ErrorAction SilentlyContinue)
+            if ($probeDumps.Count -gt 0) {
+              break
+            }
+            Start-Sleep -Seconds 2
+          }
+
+          if ($probeDumps.Count -eq 0) {
+            throw 'The native dump monitor did not capture the crash probe.'
+          }
+
+          $probeDumps | ForEach-Object {
+            [ordered]@{
+              name = $_.Name
+              size = $_.Length
+              sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            } | ConvertTo-Json -Compress
+          }
+          $probeDumps | Remove-Item -Force
+          "DUMP_MONITOR_EXE=$monitorExe" >> $env:GITHUB_ENV
+
+      - name: Download fixed-run dependency lockfile
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: node-65756-v24-fixed-stress-evidence-attempt-1
+          run-id: 34694724835
+          github-token: ${{ github.token }}
+          path: reference-evidence
+
+      - name: Verify and restore the reference lockfile
+        shell: pwsh
+        run: |
+          $lock = 'reference-evidence/resolved-package-lock.json'
+          $hash = (Get-FileHash $lock -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:REFERENCE_LOCK_SHA256) { throw 'Reference lockfile checksum mismatch' }
+          Copy-Item $lock fixture/package-lock.json -Force
+
+      - name: Install and build the stress fixture
+        working-directory: fixture
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { throw 'npm ci failed' }
+          Copy-Item package-lock.json ../resolved-package-lock.json
+          npm run build:server
+          if ($LASTEXITCODE -ne 0) { throw 'Fixture build failed' }
+
+      - name: Write the targeted stress driver
+        shell: bash
+        run: |
+          cat > fixture/targeted-stress-driver.mjs <<'EOF'
+          import { spawnSync } from 'node:child_process';
+          import {
+            copyFileSync,
+            existsSync,
+            mkdirSync,
+            readFileSync,
+            readdirSync,
+            writeFileSync,
+          } from 'node:fs';
+
+          const iteration = Number(process.argv[2]);
+          const target = process.argv[3];
+          const outputDirectory = 'targeted-logs';
+          const specPath = `${outputDirectory}/run-${iteration}.spec.log`;
+          const junitPath = `${outputDirectory}/run-${iteration}.junit.xml`;
+
+          mkdirSync(outputDirectory, { recursive: true });
+
+          const dumpDirectory = process.env.DUMP_DIRECTORY;
+          const dumpMonitorExe = process.env.DUMP_MONITOR_EXE;
+          const dumpsBefore = new Set(
+            readdirSync(dumpDirectory).filter((name) => name.endsWith('.dmp')),
+          );
+
+          const result = spawnSync(dumpMonitorExe, [
+            dumpDirectory,
+            process.execPath,
+            '--test',
+            '--test-concurrency=1',
+            '--test-reporter=spec',
+            `--test-reporter-destination=${specPath}`,
+            '--test-reporter=junit',
+            `--test-reporter-destination=${junitPath}`,
+            target,
+          ], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+
+          const newDumps = readdirSync(dumpDirectory).filter(
+            (name) => name.endsWith('.dmp') && !dumpsBefore.has(name),
+          );
+
+          const stdoutPath = `${outputDirectory}/run-${iteration}.stdout.log`;
+          const stderrPath = `${outputDirectory}/run-${iteration}.stderr.log`;
+          writeFileSync(stdoutPath, result.stdout ?? Buffer.alloc(0));
+          writeFileSync(stderrPath, result.stderr ?? Buffer.alloc(0));
+
+          const junit = existsSync(junitPath) ? readFileSync(junitPath, 'utf8') : '';
+          const childExitCodes = Array.from(
+            junit.matchAll(/exitCode: (-?\d+)/g),
+            (match) => Number(match[1]),
+          );
+          const childSignals = Array.from(
+            junit.matchAll(/signal: '([A-Z0-9]+)'/g),
+            (match) => match[1],
+          );
+          const isNativeCode = (code) => Number.isInteger(code) && (code >>> 0) >= 0x80000000;
+          const nativeCrash = newDumps.length > 0 ||
+            isNativeCode(result.status) || childExitCodes.some(isNativeCode) ||
+            /DEBUG_EXCEPTION .* first=0/.test(String(result.stdout));
+          const infrastructureFailure = Boolean(result.error) || result.signal !== null ||
+            (!nativeCrash && result.status !== 0 && result.status !== 1) ||
+            (!nativeCrash && childSignals.length > 0) || !existsSync(junitPath);
+          const ordinaryFailure = !nativeCrash && !infrastructureFailure && result.status === 1;
+          const hit = nativeCrash || infrastructureFailure;
+          const summary = {
+            iteration,
+            target,
+            status: result.status,
+            signal: result.signal,
+            error: result.error?.message ?? null,
+            nativeCrash,
+            infrastructureFailure,
+            ordinaryFailure,
+            childExitCodes,
+            childSignals,
+            newDumps,
+            hit,
+          };
+
+          if (hit) {
+            for (const path of [specPath, junitPath, stdoutPath, stderrPath]) {
+              if (existsSync(path)) {
+                copyFileSync(path, path.replace('/run-', '/HIT-run-'));
+              }
+            }
+          }
+
+          writeFileSync(
+            `${outputDirectory}/result-${iteration}.json`,
+            `${JSON.stringify(summary, null, 2)}\n`,
+          );
+          console.log(`STRESS_RESULT ${JSON.stringify(summary)}`);
+          EOF
+
+      - name: Run until the first crash
+        id: stress
+        working-directory: fixture
+        shell: pwsh
+        run: |
+          node -p "JSON.stringify({ `
+            execPath: process.execPath, `
+            version: process.version, `
+            v8: process.versions.v8 `
+          })"
+
+          $hitIteration = 0
+          for ($iteration = 1; $iteration -le [int]$env:MAX_ITERATIONS; $iteration++) {
+            node targeted-stress-driver.mjs $iteration $env:TARGET_TEST
+            if ($LASTEXITCODE -ne 0) {
+              throw "The targeted stress driver failed in iteration $iteration."
+            }
+
+            $result = Get-Content "targeted-logs/result-$iteration.json" `
+              -Raw | ConvertFrom-Json
+            if ($result.hit) {
+              $hitIteration = $iteration
+              break
+            }
+
+            if ($iteration % 100 -eq 0) {
+              "Completed $iteration iterations without a crash."
+            }
+          }
+
+          $dumpFiles = @()
+          if ($hitIteration -gt 0) {
+            for ($attempt = 1; $attempt -le 30; $attempt++) {
+              $dumpFiles = @(Get-ChildItem $env:DUMP_DIRECTORY -Filter '*.dmp' `
+                -File -ErrorAction SilentlyContinue)
+              if ($dumpFiles.Count -gt 0) {
+                break
+              }
+              Start-Sleep -Seconds 2
+            }
+          }
+
+          $hitDetected = $hitIteration -gt 0
+          $dumpCaptured = $dumpFiles.Count -gt 0
+          "hit_detected=$($hitDetected.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "dump_captured=$($dumpCaptured.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+          $results = @(Get-ChildItem targeted-logs/result-*.json | ForEach-Object {
+            Get-Content $_.FullName -Raw | ConvertFrom-Json
+          })
+          $summary = [ordered]@{
+            nativeCrashIterations = @($results | Where-Object nativeCrash).Count
+            ordinaryFailureIterations = @($results | Where-Object ordinaryFailure).Count
+            infrastructureFailureIterations = @($results | Where-Object infrastructureFailure).Count
+            nodeVersion = $env:NODE_VERSION
+            sourceSHA = $env:NODE_SOURCE_SHA
+            baseSHA = $env:NODE_BASE_SHA
+            variant = $env:VARIANT
+            referenceRun = '34694724835'
+            referenceLockSHA256 = $env:REFERENCE_LOCK_SHA256
+            nodeExeSHA256 = $env:NODE_EXE_SHA256
+            target = $env:TARGET_TEST
+            maxIterations = [int]$env:MAX_ITERATIONS
+            completedIterations = if ($hitDetected) { $hitIteration } else { [int]$env:MAX_ITERATIONS }
+            hitIteration = $hitIteration
+            dumpCount = $dumpFiles.Count
+            dumps = @($dumpFiles | ForEach-Object {
+              [ordered]@{
+                name = $_.Name
+                size = $_.Length
+                sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              }
+            })
+          }
+          $summary | ConvertTo-Json -Depth 4 | Set-Content dump-summary.json
+          $summary | ConvertTo-Json -Depth 4
+          "### Full-suite dump capture: hit=$hitDetected, dump=$dumpCaptured" |
+            Add-Content $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload crash evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: node-65756-v24-base-stress-evidence-attempt-${{ github.run_attempt }}
+          path: |
+            fixture/targeted-logs/result-*.json
+            fixture/targeted-logs/*.log
+            fixture/targeted-logs/*.xml
+            fixture/dump-summary.json
+            resolved-package-lock.json
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Fail when stress stopped abnormally
+        if: always() && steps.stress.outputs.hit_detected == 'true'
+        shell: pwsh
+        run: throw 'Stress stopped abnormally; inspect evidence and classification.'
+
+      - name: Require a dump when a crash was detected
+        if: >-
+          always() &&
+          steps.stress.outputs.hit_detected == 'true' &&
+          steps.stress.outputs.dump_captured != 'true'
+        shell: pwsh
+        run: throw 'Stress stopped abnormally without a dump; inspect result classification.'
