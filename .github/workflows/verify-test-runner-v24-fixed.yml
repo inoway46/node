@@ -60,29 +60,17 @@ jobs:
           & ./Release/node.exe --version
           if ($LASTEXITCODE -ne 0) { throw 'Built Node.js failed to start' }
 
-      - name: Run the three cppgc regression tests
-        shell: pwsh
-        run: |
-          $filter = 'CppgcTest.VmScriptCollectedBeforeFreeEnvironmentSweptAfter:' +
-            'CppgcTest.CleanIsNotCalledWithFreedRealm:' +
-            'CppgcTest.WrappersAliveAtFreeEnvironmentDoNotLeak'
-          & ./Release/cctest.exe "--gtest_filter=$filter" '--gtest_output=xml:focused-cctest.xml'
-          if ($LASTEXITCODE -ne 0) { throw 'Focused cppgc regression tests failed' }
-          [xml]$report = Get-Content focused-cctest.xml -Raw
-          if ([int]$report.testsuites.tests -ne 3) { throw 'Expected exactly three focused tests' }
-
-      - name: Save build metadata and focused results
+      - name: Save build metadata
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: node-65756-v24-build-evidence
+          name: node-65756-v24-build-evidence-attempt-${{ github.run_attempt }}
           path: |
             source-sha.txt
             applied-fix.patch
             visual-studio.json
             build-command.txt
             build-hashes.json
-            focused-cctest.xml
           retention-days: 30
 
       - name: Save reusable Windows build
@@ -96,8 +84,39 @@ jobs:
             build-hashes.json
           retention-days: 30
 
-  capture:
+  focused:
+    name: Three cppgc regression tests / saved build
     needs: build
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - name: Download the fixed Windows build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: node-65756-v24-fixed-windows-x64
+          path: fixed-build
+
+      - name: Run the three cppgc regression tests
+        shell: pwsh
+        run: |
+          $filter = 'CppgcTest.VmScriptCollectedBeforeFreeEnvironmentSweptAfter:' +
+            'CppgcTest.CleanIsNotCalledWithFreedRealm:' +
+            'CppgcTest.WrappersAliveAtFreeEnvironmentDoNotLeak'
+          & ./fixed-build/Release/cctest.exe "--gtest_filter=$filter" '--gtest_output=xml:focused-cctest.xml'
+          if ($LASTEXITCODE -ne 0) { throw 'Focused cppgc regression tests failed' }
+          [xml]$report = Get-Content focused-cctest.xml -Raw
+          if ([int]$report.testsuites.tests -ne 3) { throw 'Expected exactly three focused tests' }
+
+      - name: Save focused test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: node-65756-v24-focused-results-attempt-${{ github.run_attempt }}
+          path: focused-cctest.xml
+          retention-days: 30
+
+  capture:
+    needs: [build, focused]
     name: v24.20.0 plus 65778 / full-suite stress
     runs-on: windows-2025
     timeout-minutes: 180
@@ -590,7 +609,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: node-65756-v24-fixed-stress-evidence
+          name: node-65756-v24-fixed-stress-evidence-attempt-${{ github.run_attempt }}
           path: |
             fixture/targeted-logs/result-*.json
             fixture/targeted-logs/*.log
