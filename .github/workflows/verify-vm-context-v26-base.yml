@@ -1,0 +1,77 @@
+name: Verify v26.8.2 VM contexts (official binary)
+
+on:
+  push:
+    branches:
+      - codex/verify-66053-release-bases
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: 26.8.2
+  NODE_BASE_SHA: f2f2c2f246c36bd74f082cb43ecfe830657d81c9
+  NODE_ARCHIVE_SHA256: 40e1d3225c1c9ae9a2671c98ecb9857e4d5555026394f348645676798840d5c5
+  VARIANT: official-v26
+  TRIALS: '10'
+  CONTROL_TRIALS: '3'
+
+jobs:
+  verify:
+    name: Official v26.8.2 / Linux x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out the comparison harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: comparison
+          persist-credentials: false
+
+      - name: Download and verify the official binary
+        run: |
+          mkdir -p evidence node-dist
+          archive="node-v${NODE_VERSION}-linux-x64.tar.xz"
+          url="https://nodejs.org/dist/v${NODE_VERSION}/${archive}"
+          curl --fail --silent --show-error --location --retry 3 "$url" -o "$archive"
+          printf '%s  %s\n' "$NODE_ARCHIVE_SHA256" "$archive" | sha256sum --check
+          printf '%s\n' "$url" > evidence/download-url.txt
+          sha256sum "$archive" > evidence/archive-sha256.txt
+          tar -xJf "$archive" --strip-components=1 -C node-dist
+          test "$(node-dist/bin/node --version)" = "v${NODE_VERSION}"
+          sha256sum node-dist/bin/node > evidence/binary-sha256.txt
+          printf '%s\n' "$NODE_BASE_SHA" > evidence/release-source-sha.txt
+          git -C comparison rev-parse HEAD > evidence/harness-sha.txt
+          sha256sum comparison/tools/issue-66053/* > evidence/fixture-hashes.txt
+          node-dist/bin/node -p 'JSON.stringify(process.versions, null, 2)' > evidence/versions.json
+          node-dist/bin/node -p 'JSON.stringify(process.config, null, 2)' > evidence/config.json
+          {
+            uname -a
+            lscpu
+            free -h
+            printf 'ImageOS=%s\nImageVersion=%s\n' "$ImageOS" "$ImageVersion"
+          } > evidence/environment.txt
+
+      - name: Run the identical workload and control
+        id: reproduce
+        run: |
+          ulimit -c 0
+          node-dist/bin/node comparison/tools/issue-66053/run.mjs evidence/results
+
+      - name: Upload distribution and reproduction evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: node-66053-v26-official-evidence-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload the tested binary
+        if: always() && steps.reproduce.outcome != 'skipped'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: node-66053-v26-official-linux-x64-${{ github.run_attempt }}
+          path: node-dist/bin/node
+          retention-days: 30
+          if-no-files-found: error

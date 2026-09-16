@@ -1,5 +1,5 @@
 diff --git a/deps/v8/src/compiler/heap-refs.cc b/deps/v8/src/compiler/heap-refs.cc
-index 7a470132d7f..ea81ba5932b 100644
+index 7a470132d7f..1d379a2fc6e 100644
 --- a/deps/v8/src/compiler/heap-refs.cc
 +++ b/deps/v8/src/compiler/heap-refs.cc
 @@ -839,34 +839,33 @@ InstanceType HeapObjectData::GetMapInstanceType() const {
@@ -75,7 +75,15 @@ index 7a470132d7f..ea81ba5932b 100644
  }
 
  namespace {
-@@ -1807,6 +1804,11 @@ ObjectRef MapRef::GetConstructor(JSHeapBroker* broker) const {
+@@ -1626,6 +1623,7 @@ HEAP_ACCESSOR_B(Map, bit_field3, NumberOfOwnDescriptors,
+                 Map::Bits3::NumberOfOwnDescriptorsBits)
+ HEAP_ACCESSOR_B(Map, bit_field3, is_migration_target,
+                 Map::Bits3::IsMigrationTargetBit)
++BIMODAL_ACCESSOR_B(Map, bit_field3, is_extensible, Map::Bits3::IsExtensibleBit)
+ BIMODAL_ACCESSOR_B(Map, bit_field3, construction_counter,
+                    Map::Bits3::ConstructionCounterBits)
+ HEAP_ACCESSOR_B(Map, bit_field, has_prototype_slot,
+@@ -1807,6 +1805,11 @@ ObjectRef MapRef::GetConstructor(JSHeapBroker* broker) const {
    return MakeRefAssumeMemoryFence(broker, object()->GetConstructor());
  }
 
@@ -87,7 +95,7 @@ index 7a470132d7f..ea81ba5932b 100644
  HeapObjectRef MapRef::GetBackPointer(JSHeapBroker* broker) const {
    // Immutable after initialization.
    return MakeRefAssumeMemoryFence(broker,
-@@ -2461,6 +2463,18 @@ OptionalMapRef JSObjectRef::GetObjectCreateMap(JSHeapBroker* broker) const {
+@@ -2461,6 +2464,19 @@ OptionalMapRef JSObjectRef::GetObjectCreateMap(JSHeapBroker* broker) const {
        maybe_object_create_map.GetHeapObjectAssumeWeak(), kAssumeMemoryFence));
  }
 
@@ -97,7 +105,8 @@ index 7a470132d7f..ea81ba5932b 100644
 +  // Keep in sync with Isolate::IsInCreationContext:
 +  MapRef metamap = map.map(broker);
 +  // Filter out native-context independent objects.
-+  if (*metamap.object() == ReadOnlyRoots(broker->isolate()).meta_map()) return false;
++  if (*metamap.object() == ReadOnlyRoots(broker->isolate()).meta_map())
++    return false;
 +  OptionalNativeContextRef native_context = metamap.native_context(broker);
 +  if (!native_context.has_value()) return false;
 +  return native_context->initial_array_prototype(broker).equals(*this);
@@ -107,7 +116,7 @@ index 7a470132d7f..ea81ba5932b 100644
    if (data_->should_access_heap()) return true;
    CHECK(broker->mode() == JSHeapBroker::kSerializing ||
 diff --git a/deps/v8/src/compiler/heap-refs.h b/deps/v8/src/compiler/heap-refs.h
-index cdf57451546..5ff898f5abc 100644
+index cdf57451546..04917b153df 100644
 --- a/deps/v8/src/compiler/heap-refs.h
 +++ b/deps/v8/src/compiler/heap-refs.h
 @@ -623,6 +623,10 @@ class JSObjectRef : public JSReceiverRef {
@@ -121,7 +130,15 @@ index cdf57451546..5ff898f5abc 100644
  };
 
  class JSDataViewRef : public JSObjectRef {
-@@ -940,6 +944,7 @@ class V8_EXPORT_PRIVATE MapRef : public HeapObjectRef {
+@@ -899,6 +903,7 @@ class V8_EXPORT_PRIVATE MapRef : public HeapObjectRef {
+   bool has_indexed_interceptor() const;
+   int construction_counter() const;
+   bool is_migration_target() const;
++  bool is_extensible() const;
+   bool supports_fast_array_iteration(JSHeapBroker* broker) const;
+   bool supports_fast_array_resize(JSHeapBroker* broker) const;
+   bool is_abandoned_prototype_map() const;
+@@ -940,6 +945,7 @@ class V8_EXPORT_PRIVATE MapRef : public HeapObjectRef {
 
    MapRef FindRootMap(JSHeapBroker* broker) const;
    ObjectRef GetConstructor(JSHeapBroker* broker) const;

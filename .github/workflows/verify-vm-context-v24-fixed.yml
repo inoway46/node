@@ -3,7 +3,7 @@ name: Verify v24.21.0 VM contexts (fixed)
 on:
   push:
     branches:
-      - codex/verify-66053-v24
+      - codex/verify-66053-v24-fixed
     paths:
       - .github/workflows/verify-vm-context-v24-fixed.yml
       - tools/issue-66053/**
@@ -70,11 +70,23 @@ jobs:
           } > evidence/environment.txt
           printf '%s\n' './configure --ninja' 'ninja -C out/Release -j4 node' > evidence/build-command.txt
 
-      - name: Build Node.js from source
+      - name: Compile the backported V8 sources first
         working-directory: node
         run: |
           set -o pipefail
           ./configure --ninja 2>&1 | tee ../evidence/configure.log
+          ninja -C out/Release -j4 \
+            obj/deps/v8/src/compiler/v8_compiler.heap-refs.o \
+            obj/deps/v8/src/compiler/v8_compiler.js-heap-broker.o \
+            obj/deps/v8/src/compiler/v8_compiler.js-native-context-specialization.o \
+            obj/deps/v8/src/compiler/v8_compiler.node-properties.o \
+            obj/deps/v8/src/maglev/v8_base_without_compiler.maglev-graph-builder.o \
+            2>&1 | tee ../evidence/v8-compile.log
+
+      - name: Build Node.js from source
+        working-directory: node
+        run: |
+          set -o pipefail
           ninja -C out/Release -j4 node 2>&1 | tee ../evidence/build.log
           test "$(out/Release/node --version)" = v24.21.0
           sha256sum out/Release/node > ../evidence/binary-sha256.txt
