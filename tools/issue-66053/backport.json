@@ -1,0 +1,15 @@
+{
+  "issue": "https://github.com/nodejs/node/issues/66053",
+  "baseVersion": "v24.21.0",
+  "baseCommit": "955266bfdd854cd280dffd47548673914484e4c0",
+  "upstreamCommits": [
+    "https://github.com/v8/v8/commit/8901c793e4392dfea261bcbf9c679e2978847d4d",
+    "https://github.com/v8/v8/commit/c3553509f460b104cb8d4faf610d229a2d033f7b"
+  ],
+  "adaptations": [
+    "Apply V8 source paths under deps/v8.",
+    "Adjust removed-code and surrounding context to v24: Context::get instead of GetNoCell, existing JSObject-only constexpr, out-of-line TryGetOrCreateData, and kRelaxedLoad in the removed descriptor read.",
+    "Use ReadOnlyRoots(broker->isolate()).meta_map() because v24 ObjectRef has no GetReadOnlyRoots helper. The compared read-only root is unchanged."
+  ],
+  "scope": "Compare the combined backport against unmodified v24.21.0. This does not isolate the two commits individually or establish complete regression safety."
+}

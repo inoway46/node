@@ -1,0 +1,106 @@
+name: Verify v24.21.0 VM contexts (fixed)
+
+on:
+  push:
+    branches:
+      - codex/verify-66053-v24
+    paths:
+      - .github/workflows/verify-vm-context-v24-fixed.yml
+      - tools/issue-66053/**
+
+permissions:
+  contents: read
+
+env:
+  NODE_BASE_SHA: 955266bfdd854cd280dffd47548673914484e4c0
+  VARIANT: fixed
+  CC: gcc-13
+  CXX: g++-13
+  TRIALS: '10'
+  CONTROL_TRIALS: '3'
+
+jobs:
+  verify:
+    name: Build and reproduce / fixed / Linux x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out the comparison harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: comparison
+          persist-credentials: false
+
+      - name: Check out unmodified v24.21.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: nodejs/node
+          ref: ${{ env.NODE_BASE_SHA }}
+          path: node
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build gcc-13 g++-13
+
+      - name: Prepare and record the source
+        run: |
+          mkdir -p evidence
+          test "$(git -C node rev-parse HEAD)" = "$NODE_BASE_SHA"
+          test -z "$(git -C node status --porcelain)"
+          if [ "$VARIANT" = fixed ]; then
+            git -C node apply --check ../comparison/tools/issue-66053/v8-backport.patch
+            git -C node apply ../comparison/tools/issue-66053/v8-backport.patch
+          fi
+          git -C node diff --check
+          git -C node rev-parse HEAD > evidence/source-sha.txt
+          git -C comparison rev-parse HEAD > evidence/harness-sha.txt
+          git -C node diff --binary > evidence/applied-fix.patch
+          sha256sum comparison/tools/issue-66053/* > evidence/fixture-hashes.txt
+          {
+            uname -a
+            lscpu
+            free -h
+            gcc-13 --version
+            g++-13 --version
+            python3 --version
+            ninja --version
+            printf 'ImageOS=%s\nImageVersion=%s\n' "$ImageOS" "$ImageVersion"
+          } > evidence/environment.txt
+          printf '%s\n' './configure --ninja' 'ninja -C out/Release -j4 node' > evidence/build-command.txt
+
+      - name: Build Node.js from source
+        working-directory: node
+        run: |
+          set -o pipefail
+          ./configure --ninja 2>&1 | tee ../evidence/configure.log
+          ninja -C out/Release -j4 node 2>&1 | tee ../evidence/build.log
+          test "$(out/Release/node --version)" = v24.21.0
+          sha256sum out/Release/node > ../evidence/binary-sha256.txt
+          cp config.gypi ../evidence/
+          out/Release/node -p 'JSON.stringify(process.versions, null, 2)' > ../evidence/versions.json
+
+      - name: Run the identical workload and control
+        id: reproduce
+        run: |
+          ulimit -c 0
+          node/out/Release/node comparison/tools/issue-66053/run.mjs evidence/results
+
+      - name: Upload source, build, and reproduction evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: node-66053-v24-fixed-evidence-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload the tested binary
+        if: always() && steps.reproduce.outcome != 'skipped'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: node-66053-v24-fixed-linux-x64-${{ github.run_attempt }}
+          path: node/out/Release/node
+          retention-days: 30
+          if-no-files-found: error

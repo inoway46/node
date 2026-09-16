@@ -1,0 +1,286 @@
+diff --git a/deps/v8/src/compiler/heap-refs.cc b/deps/v8/src/compiler/heap-refs.cc
+index 7a470132d7f..ea81ba5932b 100644
+--- a/deps/v8/src/compiler/heap-refs.cc
++++ b/deps/v8/src/compiler/heap-refs.cc
+@@ -839,34 +839,33 @@ InstanceType HeapObjectData::GetMapInstanceType() const {
+
+ namespace {
+
+-bool IsReadOnlyLengthDescriptor(Isolate* isolate,
+-                                DirectHandle<Map> jsarray_map) {
+-  DCHECK(!jsarray_map->is_dictionary_map());
+-  Tagged<DescriptorArray> descriptors =
+-      jsarray_map->instance_descriptors(isolate, kRelaxedLoad);
++bool IsReadOnlyLengthDescriptor(JSHeapBroker* broker, MapRef jsarray_map) {
++  DCHECK(!jsarray_map.is_dictionary_map());
++  DescriptorArrayRef descriptors = jsarray_map.instance_descriptors(broker);
+   static_assert(
+       JSArray::kLengthOffset == JSObject::kHeaderSize,
+       "The length should be the first property on the descriptor array");
+   InternalIndex offset(0);
+-  return descriptors->GetDetails(offset).IsReadOnly();
++  return descriptors.GetPropertyDetails(offset).IsReadOnly();
+ }
+
+ // Important: this predicate does not check Protectors::IsNoElementsIntact. The
+ // compiler checks protectors through the compilation dependency mechanism; it
+ // doesn't make sense to do that here as part of every MapData construction.
+ // Callers *must* take care to take the correct dependency themselves.
+-bool SupportsFastArrayIteration(JSHeapBroker* broker, DirectHandle<Map> map) {
+-  return map->instance_type() == JS_ARRAY_TYPE &&
+-         IsFastElementsKind(map->elements_kind()) &&
+-         IsJSArray(map->prototype()) &&
+-         broker->IsArrayOrObjectPrototype(broker->CanonicalPersistentHandle(
+-             Cast<JSArray>(map->prototype())));
++bool SupportsFastArrayIteration(JSHeapBroker* broker, MapRef map) {
++  if (map.instance_type() != JS_ARRAY_TYPE ||
++      !IsFastElementsKind(map.elements_kind())) {
++    return false;
++  }
++  HeapObjectRef prototype = map.prototype(broker);
++  return prototype.IsJSArray() &&
++         prototype.AsJSArray().IsArrayOrObjectPrototype(broker);
+ }
+
+-bool SupportsFastArrayResize(JSHeapBroker* broker, DirectHandle<Map> map) {
+-  return SupportsFastArrayIteration(broker, map) && map->is_extensible() &&
+-         !map->is_dictionary_map() &&
+-         !IsReadOnlyLengthDescriptor(broker->isolate(), map);
++bool SupportsFastArrayResize(JSHeapBroker* broker, MapRef map) {
++  return SupportsFastArrayIteration(broker, map) && map.is_extensible() &&
++         !map.is_dictionary_map() && !IsReadOnlyLengthDescriptor(broker, map);
+ }
+
+ }  // namespace
+@@ -1039,8 +1038,6 @@ void JSHeapBroker::InitializeAndStartSerializing(
+   refs_ =
+       zone()->New<RefsMap>(kInitialRefsBucketCount, AddressMatcher(), zone());
+
+-  CollectArrayAndObjectPrototypes();
+-
+   SetTargetNativeContextRef(target_native_context);
+ }
+
+@@ -1250,11 +1247,11 @@ bool MapRef::PrototypesElementsDoNotHaveAccessorsOrThrow(
+ }
+
+ bool MapRef::supports_fast_array_iteration(JSHeapBroker* broker) const {
+-  return SupportsFastArrayIteration(broker, object());
++  return SupportsFastArrayIteration(broker, *this);
+ }
+
+ bool MapRef::supports_fast_array_resize(JSHeapBroker* broker) const {
+-  return SupportsFastArrayResize(broker, object());
++  return SupportsFastArrayResize(broker, *this);
+ }
+
+ namespace {
+@@ -1807,6 +1804,11 @@ ObjectRef MapRef::GetConstructor(JSHeapBroker* broker) const {
+   return MakeRefAssumeMemoryFence(broker, object()->GetConstructor());
+ }
+
++NativeContextRef MapRef::native_context(JSHeapBroker* broker) const {
++  // Immutable after initialization.
++  return MakeRefAssumeMemoryFence(broker, object()->native_context());
++}
++
+ HeapObjectRef MapRef::GetBackPointer(JSHeapBroker* broker) const {
+   // Immutable after initialization.
+   return MakeRefAssumeMemoryFence(broker,
+@@ -2461,6 +2463,18 @@ OptionalMapRef JSObjectRef::GetObjectCreateMap(JSHeapBroker* broker) const {
+       maybe_object_create_map.GetHeapObjectAssumeWeak(), kAssumeMemoryFence));
+ }
+
++bool JSObjectRef::IsArrayOrObjectPrototype(JSHeapBroker* broker) const {
++  MapRef map = this->map(broker);
++  if (map.instance_type() == JS_OBJECT_PROTOTYPE_TYPE) return true;
++  // Keep in sync with Isolate::IsInCreationContext:
++  MapRef metamap = map.map(broker);
++  // Filter out native-context independent objects.
++  if (*metamap.object() == ReadOnlyRoots(broker->isolate()).meta_map()) return false;
++  OptionalNativeContextRef native_context = metamap.native_context(broker);
++  if (!native_context.has_value()) return false;
++  return native_context->initial_array_prototype(broker).equals(*this);
++}
++
+ bool PropertyCellRef::Cache(JSHeapBroker* broker) const {
+   if (data_->should_access_heap()) return true;
+   CHECK(broker->mode() == JSHeapBroker::kSerializing ||
+diff --git a/deps/v8/src/compiler/heap-refs.h b/deps/v8/src/compiler/heap-refs.h
+index cdf57451546..5ff898f5abc 100644
+--- a/deps/v8/src/compiler/heap-refs.h
++++ b/deps/v8/src/compiler/heap-refs.h
+@@ -623,6 +623,10 @@ class JSObjectRef : public JSReceiverRef {
+   bool IsElementsTenured(FixedArrayBaseRef elements);
+
+   OptionalMapRef GetObjectCreateMap(JSHeapBroker* broker) const;
++
++  // Check if this object is its creation context's %ArrayPrototype% or
++  // %ObjectPrototype%.
++  bool IsArrayOrObjectPrototype(JSHeapBroker* broker) const;
+ };
+
+ class JSDataViewRef : public JSObjectRef {
+@@ -940,6 +944,7 @@ class V8_EXPORT_PRIVATE MapRef : public HeapObjectRef {
+
+   MapRef FindRootMap(JSHeapBroker* broker) const;
+   ObjectRef GetConstructor(JSHeapBroker* broker) const;
++  NativeContextRef native_context(JSHeapBroker* broker) const;
+ };
+
+ struct HolderLookupResult {
+diff --git a/deps/v8/src/compiler/js-heap-broker.cc b/deps/v8/src/compiler/js-heap-broker.cc
+index 3a7949ce8e4..2fddcf1c06c 100644
+--- a/deps/v8/src/compiler/js-heap-broker.cc
++++ b/deps/v8/src/compiler/js-heap-broker.cc
+@@ -47,7 +47,6 @@ JSHeapBroker::JSHeapBroker(Isolate* isolate, Zone* broker_zone,
+       refs_(zone()->New<RefsMap>(kMinimalRefsBucketCount, AddressMatcher(),
+                                  zone())),
+       root_index_map_(isolate),
+-      array_and_object_prototypes_(zone()),
+       tracing_enabled_(tracing_enabled),
+       code_kind_(code_kind),
+       feedback_(zone()),
+@@ -118,28 +117,6 @@ void JSHeapBroker::SetTargetNativeContextRef(
+   target_native_context_ = MakeRef(this, *native_context);
+ }
+
+-void JSHeapBroker::CollectArrayAndObjectPrototypes() {
+-  DisallowGarbageCollection no_gc;
+-  CHECK_EQ(mode(), kSerializing);
+-  CHECK(array_and_object_prototypes_.empty());
+-
+-  Tagged<Object> maybe_context = isolate()->heap()->native_contexts_list();
+-  while (!IsUndefined(maybe_context, isolate())) {
+-    Tagged<Context> context = Cast<Context>(maybe_context);
+-    Tagged<Object> array_prot =
+-        context->get(Context::INITIAL_ARRAY_PROTOTYPE_INDEX);
+-    Tagged<Object> object_prot =
+-        context->get(Context::INITIAL_OBJECT_PROTOTYPE_INDEX);
+-    array_and_object_prototypes_.emplace(
+-        CanonicalPersistentHandle(Cast<JSObject>(array_prot)));
+-    array_and_object_prototypes_.emplace(
+-        CanonicalPersistentHandle(Cast<JSObject>(object_prot)));
+-    maybe_context = context->next_context_link();
+-  }
+-
+-  CHECK(!array_and_object_prototypes_.empty());
+-}
+-
+ StringRef JSHeapBroker::GetTypedArrayStringTag(ElementsKind kind) {
+   DCHECK(IsTypedArrayOrRabGsabTypedArrayElementsKind(kind));
+   switch (kind) {
+@@ -154,21 +131,6 @@ StringRef JSHeapBroker::GetTypedArrayStringTag(ElementsKind kind) {
+   }
+ }
+
+-bool JSHeapBroker::IsArrayOrObjectPrototype(JSObjectRef object) const {
+-  return IsArrayOrObjectPrototype(object.object());
+-}
+-
+-bool JSHeapBroker::IsArrayOrObjectPrototype(Handle<JSObject> object) const {
+-  if (mode() == kDisabled) {
+-    return isolate()->IsInCreationContext(
+-               *object, Context::INITIAL_ARRAY_PROTOTYPE_INDEX) ||
+-           object->map(isolate_)->instance_type() == JS_OBJECT_PROTOTYPE_TYPE;
+-  }
+-  CHECK(!array_and_object_prototypes_.empty());
+-  return array_and_object_prototypes_.find(object) !=
+-         array_and_object_prototypes_.end();
+-}
+-
+ ObjectData* JSHeapBroker::TryGetOrCreateData(Tagged<Object> object,
+                                              GetOrCreateDataFlags flags) {
+   return TryGetOrCreateData(CanonicalPersistentHandle(object), flags);
+diff --git a/deps/v8/src/compiler/js-heap-broker.h b/deps/v8/src/compiler/js-heap-broker.h
+index 52677f517f5..6dcc7cb8675 100644
+--- a/deps/v8/src/compiler/js-heap-broker.h
++++ b/deps/v8/src/compiler/js-heap-broker.h
+@@ -192,11 +192,6 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
+   ObjectData* TryGetOrCreateData(Tagged<Object> object,
+                                  GetOrCreateDataFlags flags = {});
+
+-  // Check if {object} is any native context's %ArrayPrototype% or
+-  // %ObjectPrototype%.
+-  bool IsArrayOrObjectPrototype(JSObjectRef object) const;
+-  bool IsArrayOrObjectPrototype(Handle<JSObject> object) const;
+-
+   bool HasFeedback(FeedbackSource const& source) const;
+   void SetFeedback(FeedbackSource const& source,
+                    ProcessedFeedback const* feedback);
+@@ -285,12 +280,11 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
+     if (Tagged<HeapObject> heap_object;
+         TryCast<HeapObject>(object, &heap_object)) {
+       RootIndex root_index;
+-      // CollectArrayAndObjectPrototypes calls this function often with T equal
+-      // to JSObject. The root index map only contains immortal, immutable
+-      // objects; it never contains any instances of type JSObject, since
+-      // JSObjects must exist within a NativeContext, and NativeContexts can be
+-      // created and destroyed. Thus, we can skip the lookup in the root index
+-      // map for those values and save a little time.
++      // The root index map only contains immortal, immutable objects; it never
++      // contains any instances of type JSObject, since JSObjects must exist
++      // within a NativeContext, and NativeContexts can be created and
++      // destroyed. Thus, we can skip the lookup in the root index map for those
++      // values and save a little time.
+       if constexpr (std::is_convertible_v<T, JSObject>) {
+         DCHECK(!root_index_map_.Lookup(heap_object, &root_index));
+       } else if (root_index_map_.Lookup(heap_object, &root_index)) {
+@@ -428,8 +422,6 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
+   ProcessedFeedback const& ReadFeedbackForTemplateObject(
+       FeedbackSource const& source);
+
+-  void CollectArrayAndObjectPrototypes();
+-
+   void set_persistent_handles(
+       std::unique_ptr<PersistentHandles> persistent_handles) {
+     DCHECK_NULL(ph_);
+@@ -457,9 +449,6 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
+   OptionalNativeContextRef target_native_context_;
+   RefsMap* refs_;
+   RootIndexMap root_index_map_;
+-  ZoneUnorderedSet<IndirectHandle<JSObject>, IndirectHandle<JSObject>::hash,
+-                   IndirectHandle<JSObject>::equal_to>
+-      array_and_object_prototypes_;
+   BrokerMode mode_ = kDisabled;
+   bool const tracing_enabled_;
+   CodeKind const code_kind_;
+diff --git a/deps/v8/src/compiler/js-native-context-specialization.cc b/deps/v8/src/compiler/js-native-context-specialization.cc
+index e7a2abed27d..17b5f722fc8 100644
+--- a/deps/v8/src/compiler/js-native-context-specialization.cc
++++ b/deps/v8/src/compiler/js-native-context-specialization.cc
+@@ -4245,7 +4245,7 @@ bool JSNativeContextSpecialization::CanTreatHoleAsUndefined(
+   for (MapRef receiver_map : receiver_maps) {
+     ObjectRef receiver_prototype = receiver_map.prototype(broker());
+     if (!receiver_prototype.IsJSObject() ||
+-        !broker()->IsArrayOrObjectPrototype(receiver_prototype.AsJSObject())) {
++        !receiver_prototype.AsJSObject().IsArrayOrObjectPrototype(broker())) {
+       return false;
+     }
+   }
+diff --git a/deps/v8/src/compiler/node-properties.cc b/deps/v8/src/compiler/node-properties.cc
+index 6e2ef92fc0e..89af7582c5e 100644
+--- a/deps/v8/src/compiler/node-properties.cc
++++ b/deps/v8/src/compiler/node-properties.cc
+@@ -417,7 +417,7 @@ NodeProperties::InferMapsResult NodeProperties::InferMapsUnsafe(
+     // TODO(bmeurer): This can be removed once the Array.prototype and
+     // Object.prototype have NO_ELEMENTS elements kind.
+     if (!ref.IsJSObject() ||
+-        !broker->IsArrayOrObjectPrototype(ref.AsJSObject())) {
++        !ref.AsJSObject().IsArrayOrObjectPrototype(broker)) {
+       if (ref.map(broker).is_stable()) {
+         // The {receiver_map} is only reliable when we install a stability
+         // code dependency.
+diff --git a/deps/v8/src/maglev/maglev-graph-builder.cc b/deps/v8/src/maglev/maglev-graph-builder.cc
+index db081bfde62..d1133abf2e2 100644
+--- a/deps/v8/src/maglev/maglev-graph-builder.cc
++++ b/deps/v8/src/maglev/maglev-graph-builder.cc
+@@ -5594,7 +5594,7 @@ bool MaglevGraphBuilder::CanTreatHoleAsUndefined(
+   for (compiler::MapRef receiver_map : receiver_maps) {
+     compiler::ObjectRef receiver_prototype = receiver_map.prototype(broker());
+     if (!receiver_prototype.IsJSObject() ||
+-        !broker()->IsArrayOrObjectPrototype(receiver_prototype.AsJSObject())) {
++        !receiver_prototype.AsJSObject().IsArrayOrObjectPrototype(broker())) {
+       return false;
+     }
+   }
