@@ -1113,6 +1113,7 @@ HAS_XZ ?= $(shell command -v xz > /dev/null 2>&1; [ $$? -eq 0 ] && echo 1 || ech
 SKIP_XZ ?= 0
 XZ = $(shell [ $(HAS_XZ) -eq 1 ] && [ $(SKIP_XZ) -eq 0 ] && echo 1 || echo 0)
 XZ_COMPRESSION ?= 9e
+GZIP_COMPRESSION ?= 9
 PKG=$(TARNAME).pkg
 MACOSOUTDIR=out/macos
 
@@ -1345,7 +1346,7 @@ endif
 	find $(TARNAME)/ -type l | xargs $(RM)
 	tar -cf $(TARNAME).tar $(TARNAME)
 	$(RM) -r $(TARNAME)
-	gzip -c -f -9 $(TARNAME).tar > $(TARNAME).tar.gz
+	gzip -c -f -$(GZIP_COMPRESSION) $(TARNAME).tar > $(TARNAME).tar.gz
 ifeq ($(XZ), 1)
 	xz -c -f -$(XZ_COMPRESSION) $(TARNAME).tar > $(TARNAME).tar.xz
 endif
