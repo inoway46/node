@@ -1,0 +1,275 @@
+# Fork-only experiment; not part of the upstream runner-change PR.
+name: Benchmark tarball gzip - 64 per level
+
+on:
+  push:
+    branches: [codex/benchmark-gzip-64]
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: '3.14'
+  NODE_VERSION: lts/*
+  DISTTYPE: nightly
+  DATESTRING: '2026-09-23'
+
+jobs:
+  build-tarball:
+    name: gzip-${{ matrix.level }} / sample-${{ matrix.sample }}
+    runs-on: ubuntu-slim
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        include:
+          - {level: 9, sample: 1}
+          - {level: 6, sample: 1}
+          - {level: 1, sample: 1}
+          - {level: 6, sample: 2}
+          - {level: 1, sample: 2}
+          - {level: 9, sample: 2}
+          - {level: 1, sample: 3}
+          - {level: 9, sample: 3}
+          - {level: 6, sample: 3}
+          - {level: 9, sample: 4}
+          - {level: 6, sample: 4}
+          - {level: 1, sample: 4}
+          - {level: 6, sample: 5}
+          - {level: 1, sample: 5}
+          - {level: 9, sample: 5}
+          - {level: 1, sample: 6}
+          - {level: 9, sample: 6}
+          - {level: 6, sample: 6}
+          - {level: 9, sample: 7}
+          - {level: 6, sample: 7}
+          - {level: 1, sample: 7}
+          - {level: 6, sample: 8}
+          - {level: 1, sample: 8}
+          - {level: 9, sample: 8}
+          - {level: 1, sample: 9}
+          - {level: 9, sample: 9}
+          - {level: 6, sample: 9}
+          - {level: 9, sample: 10}
+          - {level: 6, sample: 10}
+          - {level: 1, sample: 10}
+          - {level: 6, sample: 11}
+          - {level: 1, sample: 11}
+          - {level: 9, sample: 11}
+          - {level: 1, sample: 12}
+          - {level: 9, sample: 12}
+          - {level: 6, sample: 12}
+          - {level: 9, sample: 13}
+          - {level: 6, sample: 13}
+          - {level: 1, sample: 13}
+          - {level: 6, sample: 14}
+          - {level: 1, sample: 14}
+          - {level: 9, sample: 14}
+          - {level: 1, sample: 15}
+          - {level: 9, sample: 15}
+          - {level: 6, sample: 15}
+          - {level: 9, sample: 16}
+          - {level: 6, sample: 16}
+          - {level: 1, sample: 16}
+          - {level: 6, sample: 17}
+          - {level: 1, sample: 17}
+          - {level: 9, sample: 17}
+          - {level: 1, sample: 18}
+          - {level: 9, sample: 18}
+          - {level: 6, sample: 18}
+          - {level: 9, sample: 19}
+          - {level: 6, sample: 19}
+          - {level: 1, sample: 19}
+          - {level: 6, sample: 20}
+          - {level: 1, sample: 20}
+          - {level: 9, sample: 20}
+          - {level: 1, sample: 21}
+          - {level: 9, sample: 21}
+          - {level: 6, sample: 21}
+          - {level: 9, sample: 22}
+          - {level: 6, sample: 22}
+          - {level: 1, sample: 22}
+          - {level: 6, sample: 23}
+          - {level: 1, sample: 23}
+          - {level: 9, sample: 23}
+          - {level: 1, sample: 24}
+          - {level: 9, sample: 24}
+          - {level: 6, sample: 24}
+          - {level: 9, sample: 25}
+          - {level: 6, sample: 25}
+          - {level: 1, sample: 25}
+          - {level: 6, sample: 26}
+          - {level: 1, sample: 26}
+          - {level: 9, sample: 26}
+          - {level: 1, sample: 27}
+          - {level: 9, sample: 27}
+          - {level: 6, sample: 27}
+          - {level: 9, sample: 28}
+          - {level: 6, sample: 28}
+          - {level: 1, sample: 28}
+          - {level: 6, sample: 29}
+          - {level: 1, sample: 29}
+          - {level: 9, sample: 29}
+          - {level: 1, sample: 30}
+          - {level: 9, sample: 30}
+          - {level: 6, sample: 30}
+          - {level: 9, sample: 31}
+          - {level: 6, sample: 31}
+          - {level: 1, sample: 31}
+          - {level: 6, sample: 32}
+          - {level: 1, sample: 32}
+          - {level: 9, sample: 32}
+          - {level: 1, sample: 33}
+          - {level: 9, sample: 33}
+          - {level: 6, sample: 33}
+          - {level: 9, sample: 34}
+          - {level: 6, sample: 34}
+          - {level: 1, sample: 34}
+          - {level: 6, sample: 35}
+          - {level: 1, sample: 35}
+          - {level: 9, sample: 35}
+          - {level: 1, sample: 36}
+          - {level: 9, sample: 36}
+          - {level: 6, sample: 36}
+          - {level: 9, sample: 37}
+          - {level: 6, sample: 37}
+          - {level: 1, sample: 37}
+          - {level: 6, sample: 38}
+          - {level: 1, sample: 38}
+          - {level: 9, sample: 38}
+          - {level: 1, sample: 39}
+          - {level: 9, sample: 39}
+          - {level: 6, sample: 39}
+          - {level: 9, sample: 40}
+          - {level: 6, sample: 40}
+          - {level: 1, sample: 40}
+          - {level: 6, sample: 41}
+          - {level: 1, sample: 41}
+          - {level: 9, sample: 41}
+          - {level: 1, sample: 42}
+          - {level: 9, sample: 42}
+          - {level: 6, sample: 42}
+          - {level: 9, sample: 43}
+          - {level: 6, sample: 43}
+          - {level: 1, sample: 43}
+          - {level: 6, sample: 44}
+          - {level: 1, sample: 44}
+          - {level: 9, sample: 44}
+          - {level: 1, sample: 45}
+          - {level: 9, sample: 45}
+          - {level: 6, sample: 45}
+          - {level: 9, sample: 46}
+          - {level: 6, sample: 46}
+          - {level: 1, sample: 46}
+          - {level: 6, sample: 47}
+          - {level: 1, sample: 47}
+          - {level: 9, sample: 47}
+          - {level: 1, sample: 48}
+          - {level: 9, sample: 48}
+          - {level: 6, sample: 48}
+          - {level: 9, sample: 49}
+          - {level: 6, sample: 49}
+          - {level: 1, sample: 49}
+          - {level: 6, sample: 50}
+          - {level: 1, sample: 50}
+          - {level: 9, sample: 50}
+          - {level: 1, sample: 51}
+          - {level: 9, sample: 51}
+          - {level: 6, sample: 51}
+          - {level: 9, sample: 52}
+          - {level: 6, sample: 52}
+          - {level: 1, sample: 52}
+          - {level: 6, sample: 53}
+          - {level: 1, sample: 53}
+          - {level: 9, sample: 53}
+          - {level: 1, sample: 54}
+          - {level: 9, sample: 54}
+          - {level: 6, sample: 54}
+          - {level: 9, sample: 55}
+          - {level: 6, sample: 55}
+          - {level: 1, sample: 55}
+          - {level: 6, sample: 56}
+          - {level: 1, sample: 56}
+          - {level: 9, sample: 56}
+          - {level: 1, sample: 57}
+          - {level: 9, sample: 57}
+          - {level: 6, sample: 57}
+          - {level: 9, sample: 58}
+          - {level: 6, sample: 58}
+          - {level: 1, sample: 58}
+          - {level: 6, sample: 59}
+          - {level: 1, sample: 59}
+          - {level: 9, sample: 59}
+          - {level: 1, sample: 60}
+          - {level: 9, sample: 60}
+          - {level: 6, sample: 60}
+          - {level: 9, sample: 61}
+          - {level: 6, sample: 61}
+          - {level: 1, sample: 61}
+          - {level: 6, sample: 62}
+          - {level: 1, sample: 62}
+          - {level: 9, sample: 62}
+          - {level: 1, sample: 63}
+          - {level: 9, sample: 63}
+          - {level: 6, sample: 63}
+          - {level: 9, sample: 64}
+          - {level: 6, sample: 64}
+          - {level: 1, sample: 64}
+    env:
+      LEVEL: ${{ matrix.level }}
+      SAMPLE: ${{ matrix.sample }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Make tarball
+        run: |
+          echo "BENCHMARK_LEVEL=$LEVEL BENCHMARK_SAMPLE=$SAMPLE SOURCE_SHA=$GITHUB_SHA"
+          /usr/bin/gzip --version
+          export COMMIT=$(git rev-parse --short=10 "$GITHUB_SHA")
+          mkdir -p "$RUNNER_TEMP/timed-bin"
+          cat > "$RUNNER_TEMP/timed-bin/gzip" <<'SCRIPT'
+          #!/bin/sh
+          /usr/bin/time -f 'GZIP_SECONDS=%e GZIP_USER_SECONDS=%U GZIP_SYSTEM_SECONDS=%S' -o "$RUNNER_TEMP/gzip.time" /usr/bin/gzip "$@"
+          status=$?
+          cat "$RUNNER_TEMP/gzip.time" >&2
+          exit "$status"
+          SCRIPT
+          chmod +x "$RUNNER_TEMP/timed-bin/gzip"
+          export PATH="$RUNNER_TEMP/timed-bin:$PATH"
+          /usr/bin/time -f 'CONFIGURE_SECONDS=%e' -o "$RUNNER_TEMP/configure.time" ./configure
+          /usr/bin/time -f 'MAKE_TAR_SECONDS=%e' -o "$RUNNER_TEMP/make.time" make tar -j4 SKIP_XZ=1 GZIP_COMPRESSION="$LEVEL"
+          stat --format='TARBALL_BYTES=%s' ./*.tar.gz | tee "$RUNNER_TEMP/size.txt"
+          # archive:false uses the filename as the actual artifact name.
+          mkdir -p benchmark-artifact
+          printf -v artifact_name 'gzip-%s-sample-%02d.tar.gz' "$LEVEL" "$SAMPLE"
+          mv ./*.tar.gz "benchmark-artifact/$artifact_name"
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          path: benchmark-artifact/*.tar.gz
+          archive: false
+          retention-days: 1
+          if-no-files-found: error
+      - name: Record available measurements
+        if: always()
+        run: |
+          {
+            echo "Level: $LEVEL; sample: $SAMPLE; source: $GITHUB_SHA"
+            echo '```text'
+            for metric in configure.time gzip.time make.time size.txt; do
+              if [ -f "$RUNNER_TEMP/$metric" ]; then
+                cat "$RUNNER_TEMP/$metric"
+              fi
+            done
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
