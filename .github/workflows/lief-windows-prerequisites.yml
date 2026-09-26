@@ -1,0 +1,217 @@
+name: LIEF Windows prerequisites probe
+
+on:
+  push:
+    branches: [codex/lief-windows-prerequisites-probe]
+    paths: [.github/workflows/lief-windows-prerequisites.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PROBE_DIR: ${{ github.workspace }}/windows-prerequisites-results
+
+jobs:
+  prerequisites:
+    if: github.repository == 'inoway46/node'
+    name: windows-x64-prerequisites
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Record runner and locate VS 2022 clang-cl
+        timeout-minutes: 2
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force $env:PROBE_DIR | Out-Null
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+          $admin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          if (-not $admin) { throw 'An elevated disposable hosted runner is required' }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          Write-Host 'BEGIN: locate Visual Studio and clang-cl'
+          $vs = & $vswhere -latest -products '*' -version '[17.14,18.0)' -requires Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset Microsoft.VisualStudio.Component.VC.Llvm.Clang -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vs) { throw 'VS 2022 17.14 clang-cl is required' }
+          "VS_INSTALL=$vs" >> $env:GITHUB_ENV
+          @{
+            revision = $env:GITHUB_SHA
+            image = $env:ImageOS
+            image_version = $env:ImageVersion
+            powershell = $PSVersionTable.PSVersion.ToString()
+            administrator = $admin
+            visual_studio = $vs
+          } | ConvertTo-Json | Set-Content "$env:PROBE_DIR/runner.json"
+          Get-Content "$env:PROBE_DIR/runner.json"
+          Write-Host 'END: locate Visual Studio and clang-cl'
+
+      - name: Install and execute NASM
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host 'BEGIN: NASM installation'
+          if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm --yes --no-progress --execution-timeout=180
+            if ($LASTEXITCODE -ne 0) { throw 'NASM installation failed' }
+            $env:PATH = "$env:ProgramFiles\NASM;$env:PATH"
+            "$env:ProgramFiles\NASM" >> $env:GITHUB_PATH
+          }
+          nasm --version
+          if ($LASTEXITCODE -ne 0) { throw 'NASM did not execute' }
+          Write-Host 'END: NASM installation'
+
+      - name: Create the test signing certificate
+        timeout-minutes: 2
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host 'BEGIN: enumerate signing certificates'
+          $existing = @(Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert)
+          if ($existing.Count -ne 0) { throw 'Expected an empty user signing store' }
+          Write-Host 'END: enumerate signing certificates'
+          Write-Host 'BEGIN: create RSA code-signing certificate'
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Node LIEF prerequisites probe' -CertStoreLocation Cert:\CurrentUser\My -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter (Get-Date).AddDays(1)
+          Export-Certificate -Cert $cert -FilePath "$env:PROBE_DIR/probe.cer" | Out-Null
+          @{
+            thumbprint = $cert.Thumbprint
+            signing_store = 'CurrentUser\My'
+            trust_store = 'LocalMachine\Root'
+          } | ConvertTo-Json | Set-Content "$env:PROBE_DIR/certificate.json"
+          Write-Host "END: create RSA code-signing certificate ($($cert.Thumbprint))"
+
+      - name: Probe the original CurrentUser Root import for at most 60 seconds
+        timeout-minutes: 2
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script = Join-Path $env:RUNNER_TEMP 'lief-original-root-import.ps1'
+          @'
+          $ErrorActionPreference = 'Stop'
+          Write-Host 'BEGIN: Import-Certificate CurrentUser Root'
+          Import-Certificate -FilePath "$env:PROBE_DIR/probe.cer" -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
+          Write-Host 'END: Import-Certificate CurrentUser Root'
+          '@ | Set-Content $script
+          $stdout = "$env:PROBE_DIR/original-root-stdout.log"
+          $stderr = "$env:PROBE_DIR/original-root-stderr.log"
+          $timer = [Diagnostics.Stopwatch]::StartNew()
+          $child = Start-Process (Get-Command pwsh).Source -ArgumentList @('-NoProfile', '-File', $script) -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+          $completed = $child.WaitForExit(60000)
+          if ($completed) {
+            $outcome = if ($child.ExitCode -eq 0) { 'completed' } else { 'failed' }
+            $code = $child.ExitCode
+          } else {
+            $outcome = 'timed-out'
+            $code = $null
+            Write-Warning 'Original user Root import exceeded 60 seconds; stopping this isolated probe'
+            Stop-Process -Id $child.Id -Force
+            if (-not $child.WaitForExit(5000)) { throw 'Could not stop the original import process' }
+          }
+          Get-Content $stdout
+          Get-Content $stderr
+          @{
+            outcome = $outcome
+            exit_code = $code
+            elapsed_seconds = [Math]::Round($timer.Elapsed.TotalSeconds, 2)
+          } | ConvertTo-Json | Set-Content "$env:PROBE_DIR/original-root.json"
+          Get-Content "$env:PROBE_DIR/original-root.json"
+          # This diagnostic outcome is separate from the required working configuration.
+
+      - name: Trust the certificate in LocalMachine Root and TrustedPublisher
+        timeout-minutes: 2
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $certFile = "$env:PROBE_DIR/probe.cer"
+          $thumbprint = (Get-Content "$env:PROBE_DIR/certificate.json" | ConvertFrom-Json).thumbprint
+          foreach ($store in @('Root', 'TrustedPublisher')) {
+            Write-Host "BEGIN: Import-Certificate LocalMachine $store"
+            Import-Certificate -FilePath $certFile -CertStoreLocation "Cert:\LocalMachine\$store" | Out-Null
+            if (-not (Test-Path "Cert:\LocalMachine\$store\$thumbprint")) {
+              throw "Certificate is missing from LocalMachine $store"
+            }
+            Write-Host "END: Import-Certificate LocalMachine $store"
+          }
+          @'
+          #include <windows.h>
+          #include <bcrypt.h>
+          #include <stdio.h>
+          int main() {
+            unsigned char bytes[16];
+            if (BCryptGenRandom(nullptr, bytes, sizeof(bytes), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) return 1;
+            puts("LIEF Windows prerequisites smoke passed");
+            return 0;
+          }
+          '@ | Set-Content "$env:PROBE_DIR/smoke.cpp"
+
+      - name: Compile with clang-cl and bcrypt then sign verify and execute
+        timeout-minutes: 3
+        shell: cmd
+        working-directory: ${{ env.PROBE_DIR }}
+        run: |
+          call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b 1
+          set "PATH=%VS_INSTALL%\VC\Tools\Llvm\x64\bin;%PATH%"
+          where clang-cl
+          if errorlevel 1 exit /b 1
+          where nasm
+          if errorlevel 1 exit /b 1
+          where signtool
+          if errorlevel 1 exit /b 1
+          clang-cl --version
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /MT /std:c++20 smoke.cpp /Fe:smoke.exe /link bcrypt.lib
+          if errorlevel 1 exit /b 1
+          signtool sign /fd SHA256 smoke.exe
+          if errorlevel 1 exit /b 1
+          signtool verify /pa /v smoke.exe
+          if errorlevel 1 exit /b 1
+          smoke.exe
+          if errorlevel 1 exit /b 1
+
+      - name: Check the existing SEA helper verification command
+        timeout-minutes: 1
+        shell: cmd
+        working-directory: ${{ env.PROBE_DIR }}
+        run: |
+          call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b 1
+          signtool verify /pa SHA256 smoke.exe
+          if errorlevel 1 exit /b 1
+
+      - name: Record the required smoke result
+        timeout-minutes: 1
+        run: |
+          @{ status = 'passed'; scope = 'prerequisites, clang-cl, bcrypt, signing, verification, execution' } | ConvertTo-Json | Set-Content "$env:PROBE_DIR/smoke.json"
+
+      - name: Summarize the probe
+        if: always()
+        timeout-minutes: 1
+        run: |
+          '## Windows prerequisites probe' >> $env:GITHUB_STEP_SUMMARY
+          'Original CurrentUser Root import and required LocalMachine trust smoke are separate results.' >> $env:GITHUB_STEP_SUMMARY
+          foreach ($name in @('runner', 'original-root', 'smoke')) {
+            $path = "$env:PROBE_DIR/$name.json"
+            "### $name" >> $env:GITHUB_STEP_SUMMARY
+            if (Test-Path $path) {
+              '```json' >> $env:GITHUB_STEP_SUMMARY
+              Get-Content $path >> $env:GITHUB_STEP_SUMMARY
+              '```' >> $env:GITHUB_STEP_SUMMARY
+            } else {
+              'Incomplete: inspect the failed step.' >> $env:GITHUB_STEP_SUMMARY
+            }
+          }
+
+      - name: Upload probe evidence
+        if: always()
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lief-windows-prerequisites-evidence
+          path: |
+            ${{ env.PROBE_DIR }}/*.json
+            ${{ env.PROBE_DIR }}/*.log
+          if-no-files-found: warn
+          retention-days: 7
