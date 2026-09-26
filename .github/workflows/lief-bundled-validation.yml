@@ -1,0 +1,219 @@
+name: Bundled LIEF 1.0.0 validation
+run-name: Bundled LIEF 1.0.0 (${{ inputs.node_ref || '485ff581e928' }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      node_ref:
+        description: Node.js SHA or PR ref to resolve once for both builds
+        type: string
+        default: 485ff581e928b82d8ba7965fa72aa78a34be5302
+        required: true
+      vendor_source:
+        description: updater/pinned replace 0.17.0; checked-in uses committed 1.0.0
+        type: choice
+        options: [updater, checked-in, pinned]
+        default: updater
+      upload_binaries:
+        description: Upload the built Node.js and smoke SEA
+        type: boolean
+        default: false
+  push:
+    branches: [codex/lief-bundled-validation]
+    paths:
+      - .github/workflows/lief-bundled-validation.yml
+      - tools/lief-validation/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lief-bundled-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: '3.13'
+  RUST_VERSION: 1.88.0
+  LIEF_HELPER: ${{ github.workspace }}/harness/tools/lief-validation/run.py
+  LIEF_INPUTS: ${{ github.workspace }}/lief-inputs
+  LIEF_WORK: ${{ github.workspace }}/lief-work
+  LIEF_RESULTS: ${{ github.workspace }}/results
+
+jobs:
+  prepare:
+    if: github.repository == 'inoway46/node'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      node_sha: ${{ steps.prepare.outputs.node_sha }}
+    steps:
+      - name: Checkout validation harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: harness
+          persist-credentials: false
+      - name: Checkout the selected Node revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: nodejs/node
+          ref: ${{ inputs.node_ref || '485ff581e928b82d8ba7965fa72aa78a34be5302' }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '24'
+      - name: Install preparation tools
+        run: python -m pip install --disable-pip-version-check cmake==4.4.3 ninja
+      - name: Prepare bundled 1.0.0 and verify the Git source archive
+        id: prepare
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          VENDOR_SOURCE: ${{ inputs.vendor_source || 'updater' }}
+        run: |
+          case "$VENDOR_SOURCE" in
+            updater)
+              python "$LIEF_HELPER" prepare --source source --output "$LIEF_INPUTS" --use-updater
+              ;;
+            pinned)
+              python "$LIEF_HELPER" prepare --source source --output "$LIEF_INPUTS" --no-use-updater
+              ;;
+            checked-in)
+              python "$LIEF_HELPER" prepare-checked-in --source source --output "$LIEF_INPUTS"
+              ;;
+            *) exit 1 ;;
+          esac
+      - name: Preparation summary
+        if: always()
+        run: python "$LIEF_HELPER" summary --results "$LIEF_INPUTS/prepare-results" --label 'Bundled input preparation'
+      - name: Upload exact bundled inputs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lief-bundled-validation-inputs
+          path: |
+            ${{ env.LIEF_INPUTS }}/node-1.0.0.tar.gz
+            ${{ env.LIEF_INPUTS }}/inputs.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Upload preparation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lief-bundled-preparation-evidence
+          path: ${{ env.LIEF_INPUTS }}/prepare-results
+          if-no-files-found: warn
+          retention-days: 14
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64-bundled-1.0.0
+            runner: macos-15
+            arch: arm64
+            jobs: 2
+            cc: /usr/bin/clang
+            cxx: /usr/bin/clang++
+          - name: linux-x64-bundled-1.0.0
+            runner: ubuntu-24.04
+            arch: x64
+            jobs: 4
+            cc: /usr/bin/gcc
+            cxx: /usr/bin/g++
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - name: Checkout validation harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install Linux build prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential nasm pkg-config
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustc --version
+      - name: Download the common bundled inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: lief-bundled-validation-inputs
+          path: ${{ env.LIEF_INPUTS }}
+      - name: Verify archive contents and runner architecture
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: python "$LIEF_HELPER" unpack --inputs "$LIEF_INPUTS" --work "$LIEF_WORK" --results "$LIEF_RESULTS" --variant bundled-1.0.0 --arch "$TARGET_ARCH"
+      - name: Configure Node with bundled LIEF
+        run: python "$LIEF_HELPER" configure --work "$LIEF_WORK" --results "$LIEF_RESULTS"
+      - name: Compile Node and bundled LIEF from fresh sources
+        env:
+          BUILD_JOBS: ${{ matrix.jobs }}
+        run: python "$LIEF_HELPER" build --work "$LIEF_WORK" --results "$LIEF_RESULTS" --jobs "$BUILD_JOBS"
+      - name: Generate and execute SEA, verify linkage, and run SEA tests
+        run: python "$LIEF_HELPER" test --work "$LIEF_WORK" --results "$LIEF_RESULTS" --execute-sea
+      - name: Summarize actual validation coverage
+        if: always()
+        env:
+          JOB_LABEL: ${{ matrix.name }}
+        run: python "$LIEF_HELPER" summary --results "$LIEF_RESULTS" --label "$JOB_LABEL"
+      - name: Upload compiler, configuration, linkage and test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: evidence-${{ matrix.name }}
+          path: ${{ env.LIEF_RESULTS }}
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload built binaries when requested
+        if: always() && inputs.upload_binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: binaries-${{ matrix.name }}
+          path: |
+            ${{ env.LIEF_WORK }}/node/out/Release/node
+            ${{ env.LIEF_WORK }}/sea-smoke
+          if-no-files-found: warn
+          retention-days: 7
+
+  summary:
+    if: always() && github.repository == 'inoway46/node'
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Workflow result
+        env:
+          NODE_SHA: ${{ needs.prepare.outputs.node_sha }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          {
+            echo '## Bundled LIEF 1.0.0 validation'
+            echo
+            echo "Node revision: $NODE_SHA"
+            echo "Input preparation: $PREPARE_RESULT"
+            echo "Build matrix: $BUILD_RESULT"
+            echo
+            echo 'macOS arm64 and Linux x64 build the same source archive without previous objects.'
+            echo 'Each job verifies bundled linkage, executes a generated SEA, and records SEA test results and skips.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$PREPARE_RESULT" = success && test "$BUILD_RESULT" = success
