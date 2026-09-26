@@ -229,7 +229,7 @@ def matrix():
 def unpack(args):
     work, inputs = args.work.resolve(), args.inputs.resolve()
     work.mkdir(parents=True, exist_ok=False)
-    metadata = json.loads((inputs / 'inputs.json').read_text())
+    metadata = json.loads((inputs / 'inputs.json').read_text(encoding='utf-8'))
     version = args.variant.split('-', 1)[1]
     bundled = args.variant.startswith('bundled-')
     vendor_version = version if bundled else '0.17.0'
@@ -255,7 +255,7 @@ def unpack(args):
 
 def state(args):
     work = args.work.resolve()
-    data = json.loads((work / 'state.json').read_text())
+    data = json.loads((work / 'state.json').read_text(encoding='utf-8'))
     return work, work / 'node', data, Runner(args.results.resolve())
 
 
@@ -339,10 +339,16 @@ def build_node(args):
     if sys.platform == 'win32':
         command = ['msbuild', 'node.sln', '/t:node', f'/m:{args.jobs}', '/p:Configuration=Release',
                    '/p:Platform=x64', '/nologo', '/clp:NoItemAndPropertyList;Verbosity=minimal']
-        env = os.environ.copy()
+        env = runtime_env(work, data)
         env.update({'UseMultiToolTask': 'True', 'EnforceProcessCountAcrossBuilds': 'True',
                     'MultiProcMaxCount': str(args.jobs)})
-        runner.run('node-build', command, node, env=env)
+        try:
+            runner.run('node-build', command, node, env=env)
+        finally:
+            snapshot = node / 'out/Release/node_mksnapshot.exe'
+            if snapshot.is_file():
+                runner.run('snapshot-dependencies', ['dumpbin', '/DEPENDENTS', snapshot], node,
+                           env=env, check=False)
     else:
         runner.run('node-build', ['make', f'-j{args.jobs}', 'V=1'], node)
     binary = node / 'out/Release' / ('node.exe' if sys.platform == 'win32' else 'node')
@@ -361,7 +367,10 @@ def debug_lief(args):
     _, node, data, runner = state(args)
     if sys.platform != 'win32' or not data['bundled']:
         return
-    runner.run('lief-debug-build', ['msbuild', 'node.sln', '/t:liblief', f'/m:{args.jobs}',
+    project = node / 'deps/LIEF/liblief.vcxproj'
+    if not project.is_file():
+        raise RuntimeError(f'The generated LIEF project is missing: {project}')
+    runner.run('lief-debug-build', ['msbuild', project, '/t:Build', f'/m:{args.jobs}',
                                   '/p:Configuration=Debug', '/p:Platform=x64', '/nologo',
                                   '/clp:NoItemAndPropertyList;Verbosity=minimal'], node)
     archives = [p for p in (node / 'out/Debug').rglob('*.lib') if 'lief' in p.name.lower()]
@@ -388,9 +397,9 @@ def inspect_dependencies(binary, label, node, data, runner, env):
         raise RuntimeError(f'{label}: bundled/shared LIEF linkage does not match the selected mode')
 
 
-def smoke(work, node, data, runner, env, execute):
+def prepare_smoke(work, data):
     smoke_dir = work / 'sea-smoke'
-    smoke_dir.mkdir()
+    smoke_dir.mkdir(exist_ok=True)
     (smoke_dir / 'main.js').write_text(
         "const assert = require('node:assert/strict');\n"
         "const sea = require('node:sea');\n"
@@ -398,12 +407,59 @@ def smoke(work, node, data, runner, env, execute):
         "assert.equal(sea.getAsset('payload', 'utf8'), 'LIEF SEA asset 😊\\n');\n"
         f"assert.ok(process.versions.lief.startsWith('{data['version']}'));\n"
         "console.log('lief-sea-smoke-ok');\n", encoding='utf-8')
-    (smoke_dir / 'payload.txt').write_text('LIEF SEA asset 😊\n', encoding='utf-8')
+    (smoke_dir / 'payload.txt').write_bytes('LIEF SEA asset 😊\n'.encode('utf-8'))
     executable = smoke_dir / ('sea.exe' if sys.platform == 'win32' else 'sea')
     write_json(smoke_dir / 'sea-config.json', {
         'main': 'main.js', 'output': executable.name, 'assets': {'payload': 'payload.txt'},
         'disableExperimentalSEAWarning': True,
     })
+    return smoke_dir, executable
+
+
+def preflight(args):
+    work, node, data, runner = state(args)
+    if sys.platform != 'win32':
+        raise RuntimeError('Native preflight requires Windows')
+    if sys.stdout.encoding.lower().replace('-', '') != 'utf8':
+        raise RuntimeError('Python stdout must use UTF-8')
+    print('Unicode output: └── 😊', flush=True)
+    smoke_dir, _ = prepare_smoke(work, data)
+    if (smoke_dir / 'payload.txt').read_bytes() != 'LIEF SEA asset 😊\n'.encode('utf-8'):
+        raise RuntimeError('Smoke payload bytes differ from the expected UTF-8 and LF')
+    for name in ['simple', 'assets']:
+        fixture = node / 'test/fixtures/sea' / name
+        config = json.loads((fixture / 'sea-config.json').read_text(encoding='utf-8'))
+        for filename in [config['main'], *config.get('assets', {}).values()]:
+            if not (fixture / filename).is_file():
+                raise RuntimeError(f'Missing SEA fixture file: {fixture / filename}')
+    for name in ['person.jpg', 'utf8_test_text.txt']:
+        if digest(node / 'test/fixtures' / name) != digest(node / 'test/fixtures/sea/assets' / name):
+            raise RuntimeError(f'The asset fixture and its expected file differ: {name}')
+    if not data['bundled']:
+        directory = work / 'lief-dll-probe'
+        directory.mkdir()
+        source, executable = directory / 'probe.cpp', directory / 'probe.exe'
+        source.write_text(
+            '#include <string>\n#include <LIEF/PE/utils.hpp>\n'
+            'int main(int, char** argv) {\n'
+            '  return LIEF::PE::is_pe(std::string(argv[0])) ? 0 : 1;\n}\n', encoding='utf-8')
+        prefix = work / 'lief-install'
+        env = runtime_env(work, data)
+        runner.run('lief-probe-build', ['clang-cl', '/nologo', '/std:c++17', '/MT', '/EHsc',
+                   '/DLIEF_IMPORT', f'/I{prefix / "include"}', source, f'/Fe{executable}',
+                   prefix / 'lib/LIEF.lib'], directory, env=env)
+        inspect_dependencies(executable, 'lief-probe-dependencies', node, data, runner, env)
+        # Deliberately do not copy the DLL next to this executable: exercise PATH
+        # lookup with the same environment used by the Node build's host tools.
+        runner.run('lief-probe-execute', [executable], directory, env=env)
+    write_json(runner.results / 'preflight.json', {
+        'status': 'passed', 'payload_utf8_lf': True, 'fixture_inputs_verified': True,
+        'external_dll_execution': 'not-applicable' if data['bundled'] else 'passed',
+    })
+
+
+def smoke(work, node, data, runner, env, execute):
+    smoke_dir, executable = prepare_smoke(work, data)
     binary = node / 'out/Release' / ('node.exe' if sys.platform == 'win32' else 'node')
     runner.run('sea-smoke-generate', [binary, '--build-sea', 'sea-config.json'], smoke_dir, env=env)
     if not executable.is_file():
@@ -533,12 +589,12 @@ def summary(args):
     directory = args.results.resolve()
     result_file = directory / 'result.json'
     if result_file.exists():
-        result = json.loads(result_file.read_text())
+        result = json.loads(result_file.read_text(encoding='utf-8'))
     else:
         result = {'status': 'incomplete: inspect failed setup/configure/build step'}
     commands = directory / 'commands.jsonl'
     if commands.exists():
-        failed = [command['label'] for line in commands.read_text().splitlines()
+        failed = [command['label'] for line in commands.read_text(encoding='utf-8').splitlines()
                   if (command := json.loads(line))['exit_code']]
         result['failed_commands'] = failed
         result['overall_status'] = 'failed' if failed else result['status']
@@ -559,7 +615,7 @@ def main():
     prep.add_argument('--archive-dir', type=Path)
     prep.add_argument('--use-updater', action=argparse.BooleanOptionalAction, default=True)
     sub.add_parser('matrix')
-    for name in ['unpack', 'external', 'configure', 'build', 'debug-lief', 'test']:
+    for name in ['unpack', 'external', 'configure', 'preflight', 'build', 'debug-lief', 'test']:
         phase = sub.add_parser(name)
         phase.add_argument('--work', type=Path, required=True)
         phase.add_argument('--results', type=Path, required=True)
@@ -575,7 +631,7 @@ def main():
     report.add_argument('--label', required=True)
     args = parser.parse_args()
     functions = {'prepare': prepare, 'matrix': lambda _: matrix(), 'unpack': unpack,
-                 'external': external, 'configure': configure, 'build': build_node,
+                 'external': external, 'configure': configure, 'preflight': preflight, 'build': build_node,
                  'debug-lief': debug_lief, 'test': test, 'summary': summary}
     functions[args.phase](args)
 

@@ -1,11 +1,11 @@
-name: LIEF Windows build and SEA validation
-run-name: Windows LIEF validation (${{ inputs.node_ref || '534c117381397a1a598f9260f96b3d96be2e620c' }})
+name: LIEF Windows build and SEA validation v2
+run-name: Windows LIEF validation v2 (${{ inputs.node_ref || '534c117381397a1a598f9260f96b3d96be2e620c' }})
 
 on:
   push:
-    branches: [codex/lief-windows-validation]
+    branches: [codex/lief-windows-validation-v2]
     paths:
-      - .github/workflows/lief-windows-validation.yml
+      - .github/workflows/lief-windows-validation-v2.yml
       - tools/lief-windows-validation/**
   workflow_dispatch:
     inputs:
@@ -23,7 +23,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: lief-windows-validation-${{ github.ref }}
+  group: lief-windows-validation-v2-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -62,6 +62,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: '24'
+      - name: Check validation harness regressions
+        run: python harness/tools/lief-windows-validation/test_harness.py
       - name: Select exactly four Windows builds
         id: matrix
         run: python "$LIEF_HELPER" matrix
@@ -117,6 +119,8 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+      - name: Check validation harness regressions on Windows
+        run: python harness/tools/lief-windows-validation/test_harness.py
       - name: Install CMake and Ninja
         timeout-minutes: 10
         run: |
@@ -207,6 +211,27 @@ jobs:
           set "PATH=%VS_INSTALL%\VC\Tools\Llvm\x64\bin;%PATH%"
           python "%LIEF_HELPER%" configure --work "%LIEF_WORK%" --results "%LIEF_RESULTS%"
           if errorlevel 1 exit /b 1
+      - name: Verify Unicode fixture inputs and external DLL execution
+        timeout-minutes: 5
+        shell: cmd
+        run: |
+          call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b 1
+          set "PATH=%VS_INSTALL%\VC\Tools\Llvm\x64\bin;%PATH%"
+          python "%LIEF_HELPER%" preflight --work "%LIEF_WORK%" --results "%LIEF_RESULTS%"
+          if errorlevel 1 exit /b 1
+      - name: Build the bundled LIEF Debug archive
+        if: startsWith(matrix.variant, 'bundled-')
+        timeout-minutes: 60
+        shell: cmd
+        env:
+          BUILD_JOBS: ${{ matrix.jobs }}
+        run: |
+          call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b 1
+          set "PATH=%VS_INSTALL%\VC\Tools\Llvm\x64\bin;%PATH%"
+          python "%LIEF_HELPER%" debug-lief --work "%LIEF_WORK%" --results "%LIEF_RESULTS%" --jobs %BUILD_JOBS%
+          if errorlevel 1 exit /b 1
       - name: Build Node Release
         id: native-build
         timeout-minutes: 300
@@ -226,18 +251,6 @@ jobs:
           call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
           if errorlevel 1 exit /b 1
           python "%LIEF_HELPER%" test --work "%LIEF_WORK%" --results "%LIEF_RESULTS%" --execute-sea
-          if errorlevel 1 exit /b 1
-      - name: Build the bundled LIEF Debug archive
-        if: always() && steps.native-build.outcome == 'success' && startsWith(matrix.variant, 'bundled-')
-        timeout-minutes: 60
-        shell: cmd
-        env:
-          BUILD_JOBS: ${{ matrix.jobs }}
-        run: |
-          call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
-          if errorlevel 1 exit /b 1
-          set "PATH=%VS_INSTALL%\VC\Tools\Llvm\x64\bin;%PATH%"
-          python "%LIEF_HELPER%" debug-lief --work "%LIEF_WORK%" --results "%LIEF_RESULTS%" --jobs %BUILD_JOBS%
           if errorlevel 1 exit /b 1
       - name: Summarize native checks and unchanged test limitations
         if: always()
