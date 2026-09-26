@@ -311,7 +311,7 @@ def external(args):
                             f'-DCMAKE_INSTALL_NAME_DIR={prefix / "lib"}']
     command = ['cmake', '-S', source, '-B', build, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release',
                '-DBUILD_SHARED_LIBS=ON', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
-               '-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON', f'-DCMAKE_INSTALL_PREFIX={prefix}',
+               '-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON', f'-DCMAKE_INSTALL_PREFIX={prefix}', '-DCMAKE_INSTALL_LIBDIR=lib',
                *compiler_options, *[f'-D{k}={v}' for k, v in options.items()]]
     try:
         runner.run('lief-configure', command, node)
@@ -374,7 +374,7 @@ def build_node(args):
                     'MultiProcMaxCount': str(args.jobs)})
         runner.run('node-build', command, node, env=env)
     else:
-        runner.run('node-build', ['make', f'-j{args.jobs}', 'V=1'], node)
+        runner.run('node-build', ['make', f'-j{args.jobs}', 'V=1'], node, env=runtime_env(work, data))
     binary = node / 'out/Release' / ('node.exe' if sys.platform == 'win32' else 'node')
     if not binary.exists():
         raise RuntimeError(f'Node output is missing: {binary}')
@@ -407,6 +407,8 @@ def runtime_env(work, data):
         env['PATH'] = lib + os.pathsep + env['PATH']
         if sys.platform == 'darwin':
             env['DYLD_LIBRARY_PATH'] = lib
+        elif sys.platform == 'linux':
+            env['LD_LIBRARY_PATH'] = lib + os.pathsep + env.get('LD_LIBRARY_PATH', '')
     return env
 
 
@@ -429,7 +431,7 @@ def smoke(work, node, data, runner, env, execute):
         "assert.equal(sea.getAsset('payload', 'utf8'), 'LIEF SEA asset 😊\\n');\n"
         f"assert.ok(process.versions.lief.startsWith('{data['version']}'));\n"
         "console.log('lief-sea-smoke-ok');\n", encoding='utf-8')
-    (smoke_dir / 'payload.txt').write_text('LIEF SEA asset 😊\n', encoding='utf-8')
+    (smoke_dir / 'payload.txt').write_bytes('LIEF SEA asset 😊\n'.encode('utf-8'))
     executable = smoke_dir / ('sea.exe' if sys.platform == 'win32' else 'sea')
     write_json(smoke_dir / 'sea-config.json', {
         'main': 'main.js', 'output': executable.name, 'assets': {'payload': 'payload.txt'},
@@ -457,9 +459,23 @@ def smoke(work, node, data, runner, env, execute):
             'sha256': digest(executable)}
 
 
+def manifest_changes(before, after):
+    changes = {}
+    for directory in before:
+        old, new = before[directory], after[directory]
+        delta = {'added': sorted(new.keys() - old.keys()),
+                 'removed': sorted(old.keys() - new.keys()),
+                 'modified': sorted(p for p in old.keys() & new.keys() if old[p] != new[p])}
+        if any(delta.values()):
+            changes[directory] = delta
+    return changes
+
+
 def test(args):
     work, node, data, runner = state(args)
     env = runtime_env(work, data)
+    test_directories = ['test/common', 'test/sea', 'test/fixtures/sea']
+    before = {name: manifest(node / name) for name in test_directories}
     binary = node / 'out/Release' / ('node.exe' if sys.platform == 'win32' else 'node')
     _, output = runner.run('node-runtime', [binary, '-p',
         'JSON.stringify({versions:process.versions,arch:process.arch,platform:process.platform,config:process.config.variables})'], node, env=env)
@@ -473,15 +489,19 @@ def test(args):
     if not config['node_use_lief'] or not config['single_executable_application']:
         raise RuntimeError('LIEF or SEA support was disabled')
     inspect_dependencies(binary, 'node-dependencies', node, data, runner, env)
-    smoke_result = smoke(work, node, data, runner, env, args.execute_sea)
-    write_json(runner.results / 'sea-smoke.json', smoke_result)
     failures = []
+    try:
+        smoke_result = smoke(work, node, data, runner, env, args.execute_sea)
+    except RuntimeError as error:
+        smoke_result = {'status': 'failed', 'error': str(error)}
+        failures.append('sea-smoke')
+    write_json(runner.results / 'sea-smoke.json', smoke_result)
     if args.execute_sea:
         for name in ['test-single-executable-application', 'test-single-executable-application-assets']:
             code, output = runner.run(name, [binary, f'test/sea/{name}.js'], node, env=env, check=False)
             if code or re.search(r'#\s*SKIP\S*', output, re.IGNORECASE):
                 failures.append(name)
-    suite_command = [sys.executable, 'tools/test.py', '--shell', binary, '-j1', '-p', 'tap', '--report',
+    suite_command = [sys.executable, '-B', 'tools/test.py', '--shell', binary, '-j1', '-p', 'tap', '--report',
                      '--logfile', runner.results / 'sea-tests.tap', 'sea',
                      'parallel/test-sea-assets-not-in-sea',
                      'parallel/test-sea-get-asset-keys']
@@ -489,6 +509,11 @@ def test(args):
     if code:
         failures.append('sea-suite')
     lines = (runner.results / 'sea-tests.tap').read_text(encoding='utf-8').splitlines()
+    after = {name: manifest(node / name) for name in test_directories}
+    changes = manifest_changes(before, after)
+    write_json(runner.results / 'test-source-changes.json', changes)
+    if changes:
+        failures.append('test-sources-changed')
     result = {'node_revision': data['node_revision'], 'variant': data['variant'],
               'platform': data['platform'], 'arch': data['arch'], 'sea_smoke': smoke_result,
               'required_end_to_end_tests': 'passed' if args.execute_sea and not failures else 'not-validated',
