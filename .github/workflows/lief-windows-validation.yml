@@ -1,0 +1,279 @@
+name: LIEF Windows build and SEA validation
+run-name: Windows LIEF validation (${{ inputs.node_ref || '534c117381397a1a598f9260f96b3d96be2e620c' }})
+
+on:
+  push:
+    branches: [codex/lief-windows-validation]
+    paths:
+      - .github/workflows/lief-windows-validation.yml
+      - tools/lief-windows-validation/**
+  workflow_dispatch:
+    inputs:
+      node_ref:
+        description: Node.js SHA or ref, resolved once for all four builds
+        type: string
+        required: true
+        default: 534c117381397a1a598f9260f96b3d96be2e620c
+      use_updater:
+        description: Run the updater; false prepares the pinned LIEF 1.0.0 archive
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lief-windows-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: '3.13'
+  RUST_VERSION: 1.88.0
+  LIEF_HELPER: ${{ github.workspace }}/harness/tools/lief-windows-validation/run.py
+  LIEF_INPUTS: ${{ github.workspace }}/lief-inputs
+  LIEF_WORK: ${{ github.workspace }}/lief-work
+  LIEF_RESULTS: ${{ github.workspace }}/results
+
+jobs:
+  prepare:
+    if: github.repository == 'inoway46/node'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      node_sha: ${{ steps.prepare.outputs.node_sha }}
+    steps:
+      - name: Checkout the Windows validation harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: harness
+          persist-credentials: false
+      - name: Checkout the exact Node revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: nodejs/node
+          ref: ${{ inputs.node_ref || '534c117381397a1a598f9260f96b3d96be2e620c' }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '24'
+      - name: Select exactly four Windows builds
+        id: matrix
+        run: python "$LIEF_HELPER" matrix
+      - name: Prepare and verify baseline and updater-generated source archives
+        id: prepare
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          USE_UPDATER: ${{ github.event_name == 'push' || inputs.use_updater }}
+        run: |
+          updater_option=--no-use-updater
+          if [ "$USE_UPDATER" = true ]; then updater_option=--use-updater; fi
+          python "$LIEF_HELPER" prepare --source source --output "$LIEF_INPUTS" "$updater_option"
+      - name: Summarize input preparation
+        if: always()
+        run: python "$LIEF_HELPER" summary --results "$LIEF_INPUTS/prepare-results" --label 'Input preparation'
+      - name: Upload common inputs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lief-windows-inputs
+          path: |
+            ${{ env.LIEF_INPUTS }}/node-*.tar.gz
+            ${{ env.LIEF_INPUTS }}/LIEF-*.zip
+            ${{ env.LIEF_INPUTS }}/inputs.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Upload preparation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lief-windows-preparation-evidence
+          path: ${{ env.LIEF_INPUTS }}/prepare-results
+          if-no-files-found: warn
+          retention-days: 14
+
+  build:
+    needs: prepare
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: windows-2022
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout the Windows validation harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install CMake and Ninja
+        timeout-minutes: 10
+        run: |
+          python -m pip install --disable-pip-version-check cmake==4.4.3 ninja
+          cmake --version
+          ninja --version
+      - name: Install Rust
+        timeout-minutes: 10
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustc --version
+      - name: Locate VS 2022 clang-cl
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force $env:LIEF_RESULTS | Out-Null
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          Write-Host 'BEGIN: locate Visual Studio and clang-cl'
+          $vs = & $vswhere -latest -products '*' -version '[17.14,18.0)' -requires Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset Microsoft.VisualStudio.Component.VC.Llvm.Clang -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vs) { throw 'VS 2022 17.14 clang-cl is required' }
+          "VS_INSTALL=$vs" >> $env:GITHUB_ENV
+          Write-Host "END: Visual Studio at $vs"
+      - name: Install and execute NASM
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host 'BEGIN: NASM installation'
+          if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm --yes --no-progress --execution-timeout=180
+            if ($LASTEXITCODE -ne 0) { throw 'NASM installation failed' }
+            $env:PATH = "$env:ProgramFiles\NASM;$env:PATH"
+            "$env:ProgramFiles\NASM" >> $env:GITHUB_PATH
+          }
+          nasm --version
+          if ($LASTEXITCODE -ne 0) { throw 'NASM did not execute' }
+          Write-Host 'END: NASM installation'
+      - name: Create a signing certificate and trust it in LocalMachine stores
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host 'BEGIN: create a code-signing certificate'
+          $existing = @(Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert)
+          if ($existing.Count -ne 0) { throw 'Expected an empty user signing store' }
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Node LIEF Windows validation' -CertStoreLocation Cert:\CurrentUser\My -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter (Get-Date).AddDays(1)
+          $certFile = Join-Path $env:RUNNER_TEMP 'lief-windows-validation.cer'
+          Export-Certificate -Cert $cert -FilePath $certFile | Out-Null
+          Write-Host 'END: create a code-signing certificate'
+          foreach ($store in @('Root', 'TrustedPublisher')) {
+            Write-Host "BEGIN: import LocalMachine $store"
+            Import-Certificate -FilePath $certFile -CertStoreLocation "Cert:\LocalMachine\$store" | Out-Null
+            if (-not (Test-Path "Cert:\LocalMachine\$store\$($cert.Thumbprint)")) {
+              throw "Certificate is missing from LocalMachine $store"
+            }
+            Write-Host "END: import LocalMachine $store"
+          }
+          @{ thumbprint = $cert.Thumbprint; signing_store = 'CurrentUser\My'; trust_store = 'LocalMachine\Root' } | ConvertTo-Json | Set-Content "$env:LIEF_RESULTS/signing-certificate.json"
+      - name: Download the common inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: lief-windows-inputs
+          path: ${{ env.LIEF_INPUTS }}
+      - name: Verify checksums and unpack fresh sources
+        timeout-minutes: 10
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: python "$LIEF_HELPER" unpack --inputs "$LIEF_INPUTS" --work "$LIEF_WORK" --results "$LIEF_RESULTS" --variant "$VARIANT" --arch x64
+      - name: Build external LIEF when selected
+        timeout-minutes: 120
+        shell: cmd
+        env:
+          BUILD_JOBS: ${{ matrix.jobs }}
+        run: |
+          call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b 1
+          set "PATH=%VS_INSTALL%\VC\Tools\Llvm\x64\bin;%PATH%"
+          python "%LIEF_HELPER%" external --work "%LIEF_WORK%" --results "%LIEF_RESULTS%" --jobs %BUILD_JOBS%
+          if errorlevel 1 exit /b 1
+      - name: Configure Node and verify generated linker settings
+        timeout-minutes: 10
+        shell: cmd
+        run: |
+          call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b 1
+          set "PATH=%VS_INSTALL%\VC\Tools\Llvm\x64\bin;%PATH%"
+          python "%LIEF_HELPER%" configure --work "%LIEF_WORK%" --results "%LIEF_RESULTS%"
+          if errorlevel 1 exit /b 1
+      - name: Build Node Release
+        id: native-build
+        timeout-minutes: 300
+        shell: cmd
+        env:
+          BUILD_JOBS: ${{ matrix.jobs }}
+        run: |
+          call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b 1
+          set "PATH=%VS_INSTALL%\VC\Tools\Llvm\x64\bin;%PATH%"
+          python "%LIEF_HELPER%" build --work "%LIEF_WORK%" --results "%LIEF_RESULTS%" --jobs %BUILD_JOBS%
+          if errorlevel 1 exit /b 1
+      - name: Require signed SEA smoke and basic and assets fixture execution
+        timeout-minutes: 30
+        shell: cmd
+        run: |
+          call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b 1
+          python "%LIEF_HELPER%" test --work "%LIEF_WORK%" --results "%LIEF_RESULTS%" --execute-sea
+          if errorlevel 1 exit /b 1
+      - name: Build the bundled LIEF Debug archive
+        if: always() && steps.native-build.outcome == 'success' && startsWith(matrix.variant, 'bundled-')
+        timeout-minutes: 60
+        shell: cmd
+        env:
+          BUILD_JOBS: ${{ matrix.jobs }}
+        run: |
+          call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b 1
+          set "PATH=%VS_INSTALL%\VC\Tools\Llvm\x64\bin;%PATH%"
+          python "%LIEF_HELPER%" debug-lief --work "%LIEF_WORK%" --results "%LIEF_RESULTS%" --jobs %BUILD_JOBS%
+          if errorlevel 1 exit /b 1
+      - name: Summarize native checks and unchanged test limitations
+        if: always()
+        env:
+          JOB_LABEL: ${{ matrix.name }}
+        run: python "$LIEF_HELPER" summary --results "$LIEF_RESULTS" --label "$JOB_LABEL"
+      - name: Upload compiler linker and SEA test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: evidence-${{ matrix.name }}
+          path: ${{ env.LIEF_RESULTS }}
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 14
+
+  summary:
+    if: always() && github.repository == 'inoway46/node'
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Record the Windows validation scope and outcome
+        env:
+          NODE_SHA: ${{ needs.prepare.outputs.node_sha }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          {
+            echo '## Windows LIEF validation'
+            echo
+            echo "Node revision: $NODE_SHA"
+            echo "Input preparation: $PREPARE_RESULT"
+            echo "Four native Windows builds: $BUILD_RESULT"
+            echo
+            echo 'Required checks: fresh native build, LIEF version/linkage, signed SEA execution, unchanged basic/assets fixture payloads, bundled LIEF Debug archive.'
+            echo 'Existing SEA tests remain unmodified. Known skips caused by the extra SHA256 filename in their SignTool verification command are recorded as blocked, never passed.'
+            echo 'Inspect per-job summaries and evidence artifacts for actual passes, skips and limitations.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$PREPARE_RESULT" = success && test "$BUILD_RESULT" = success
