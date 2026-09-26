@@ -27,6 +27,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  PYTHONIOENCODING: utf-8
   PYTHON_VERSION: '3.13'
   RUST_VERSION: 1.88.0
   LIEF_HELPER: ${{ github.workspace }}/harness/tools/lief-windows-validation/run.py
