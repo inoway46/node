@@ -1,0 +1,299 @@
+name: LIEF build and SEA validation
+run-name: LIEF validation (${{ inputs.node_ref || 'PR 66240 HEAD' }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      node_ref:
+        description: Node.js ref or SHA to resolve once for every job
+        type: string
+        default: refs/pull/66240/head
+        required: true
+      windows:
+        description: Windows x64, bundled and external LIEF
+        type: boolean
+        default: true
+      macos:
+        description: macOS arm64 and x64, external LIEF 1.0.0
+        type: boolean
+        default: true
+      external_old:
+        description: Include external LIEF 0.17.0 on Windows
+        type: boolean
+        default: true
+      use_updater:
+        description: Run the real updater (latest must still be 1.0.0); false uses pinned preparation
+        type: boolean
+        default: true
+      execute_macos_x64_sea:
+        description: Also execute the x64 macOS smoke SEA despite known issue 59553
+        type: boolean
+        default: false
+      upload_binaries:
+        description: Upload the built Node, LIEF DLL/dylib and smoke SEA
+        type: boolean
+        default: false
+  # Bootstrap a validation branch without adding files to the PR/default branch.
+  push:
+    branches: [codex/lief-validation]
+    paths:
+      - .github/workflows/lief-validation.yml
+      - tools/lief-validation/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lief-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: '3.13'
+  RUST_VERSION: 1.88.0
+  LIEF_HELPER: ${{ github.workspace }}/harness/tools/lief-validation/run.py
+  LIEF_INPUTS: ${{ github.workspace }}/lief-inputs
+  LIEF_WORK: ${{ github.workspace }}/lief-work
+  LIEF_RESULTS: ${{ github.workspace }}/results
+
+jobs:
+  prepare:
+    if: github.repository == 'inoway46/node'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      node_sha: ${{ steps.prepare.outputs.node_sha }}
+    steps:
+      - name: Checkout validation harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: harness
+          persist-credentials: false
+      - name: Resolve and checkout the Node revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: nodejs/node
+          ref: ${{ inputs.node_ref || 'refs/pull/66240/head' }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '24'
+      - name: Select the build matrix
+        id: matrix
+        env:
+          WANT_WINDOWS: ${{ inputs.windows }}
+          WANT_MACOS: ${{ inputs.macos }}
+          WANT_OLD: ${{ inputs.external_old }}
+          EXECUTE_MAC_X64_SEA: ${{ inputs.execute_macos_x64_sea }}
+        run: python "$LIEF_HELPER" matrix
+      - name: Run updater, stage generated files, and verify source tarballs
+        id: prepare
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          USE_UPDATER: ${{ github.event_name == 'push' || inputs.use_updater }}
+        run: |
+          updater_option=--no-use-updater
+          if [ "$USE_UPDATER" = true ]; then updater_option=--use-updater; fi
+          python "$LIEF_HELPER" prepare --source source --output "$LIEF_INPUTS" "$updater_option"
+      - name: Preparation summary
+        if: always()
+        run: python "$LIEF_HELPER" summary --results "$LIEF_INPUTS/prepare-results" --label 'Input preparation'
+      - name: Upload common inputs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lief-validation-inputs
+          path: |
+            ${{ env.LIEF_INPUTS }}/node-*.tar.gz
+            ${{ env.LIEF_INPUTS }}/LIEF-*.zip
+            ${{ env.LIEF_INPUTS }}/inputs.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Upload preparation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lief-preparation-evidence
+          path: ${{ env.LIEF_INPUTS }}/prepare-results
+          if-no-files-found: warn
+          retention-days: 14
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout validation harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install CMake and Ninja
+        run: |
+          python -m pip install --disable-pip-version-check cmake==4.4.3 ninja
+          cmake --version
+          ninja --version
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustc --version
+      - name: Windows build and signing prerequisites
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -version '[17.14,18.0)' -requires Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset Microsoft.VisualStudio.Component.VC.Llvm.Clang -property installationPath
+          if (-not $vs) { throw 'Visual Studio 2022 17.14 with its clang-cl toolset is required' }
+          "VS_INSTALL=$vs" >> $env:GITHUB_ENV
+          if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'NASM installation failed' }
+            "$env:ProgramFiles\NASM" >> $env:GITHUB_PATH
+          }
+          # Existing SEA tests invoke signtool without certificate selection.
+          $existing = @(Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert)
+          if ($existing.Count -ne 0) { throw 'Expected an empty signing certificate store on the hosted runner' }
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Node LIEF validation' -CertStoreLocation Cert:\CurrentUser\My -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter (Get-Date).AddDays(1)
+          $certFile = Join-Path $env:RUNNER_TEMP 'lief-validation.cer'
+          Export-Certificate -Cert $cert -FilePath $certFile | Out-Null
+          Import-Certificate -FilePath $certFile -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
+          Import-Certificate -FilePath $certFile -CertStoreLocation Cert:\CurrentUser\TrustedPublisher | Out-Null
+          New-Item -ItemType Directory -Force $env:LIEF_RESULTS | Out-Null
+          "Test-only certificate: $($cert.Thumbprint)" | Set-Content "$env:LIEF_RESULTS/signing-certificate.txt"
+      - name: Download the exact common inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: lief-validation-inputs
+          path: ${{ env.LIEF_INPUTS }}
+      - name: Verify checksums and unpack a fresh source tree
+        env:
+          VARIANT: ${{ matrix.variant }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: python "$LIEF_HELPER" unpack --inputs "$LIEF_INPUTS" --work "$LIEF_WORK" --results "$LIEF_RESULTS" --variant "$VARIANT" --arch "$TARGET_ARCH"
+      - name: Build external LIEF, configure Node, and compile on Windows
+        id: native-build
+        if: runner.os == 'Windows'
+        shell: cmd
+        env:
+          BUILD_JOBS: ${{ matrix.jobs }}
+        run: |
+          call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b 1
+          set "PATH=%VS_INSTALL%\VC\Tools\Llvm\x64\bin;%PATH%"
+          where clang-cl
+          where msbuild
+          where nasm
+          where signtool
+          python "%LIEF_HELPER%" external --work "%LIEF_WORK%" --results "%LIEF_RESULTS%" --jobs %BUILD_JOBS%
+          if errorlevel 1 exit /b 1
+          python "%LIEF_HELPER%" configure --work "%LIEF_WORK%" --results "%LIEF_RESULTS%"
+          if errorlevel 1 exit /b 1
+          python "%LIEF_HELPER%" build --work "%LIEF_WORK%" --results "%LIEF_RESULTS%" --jobs %BUILD_JOBS%
+          if errorlevel 1 exit /b 1
+      - name: Generate, sign and execute SEA on Windows
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b 1
+          python "%LIEF_HELPER%" test --work "%LIEF_WORK%" --results "%LIEF_RESULTS%" --execute-sea
+          if errorlevel 1 exit /b 1
+      - name: Compile the bundled LIEF Debug archive on Windows
+        if: always() && runner.os == 'Windows' && steps.native-build.outcome == 'success' && startsWith(matrix.variant, 'bundled-')
+        shell: cmd
+        env:
+          BUILD_JOBS: ${{ matrix.jobs }}
+        run: |
+          call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b 1
+          set "PATH=%VS_INSTALL%\VC\Tools\Llvm\x64\bin;%PATH%"
+          python "%LIEF_HELPER%" debug-lief --work "%LIEF_WORK%" --results "%LIEF_RESULTS%" --jobs %BUILD_JOBS%
+          if errorlevel 1 exit /b 1
+      - name: Build external LIEF on macOS
+        if: runner.os == 'macOS'
+        env:
+          BUILD_JOBS: ${{ matrix.jobs }}
+        run: python "$LIEF_HELPER" external --work "$LIEF_WORK" --results "$LIEF_RESULTS" --jobs "$BUILD_JOBS"
+      - name: Configure Node on macOS
+        if: runner.os == 'macOS'
+        run: python "$LIEF_HELPER" configure --work "$LIEF_WORK" --results "$LIEF_RESULTS"
+      - name: Compile Node on macOS
+        if: runner.os == 'macOS'
+        env:
+          BUILD_JOBS: ${{ matrix.jobs }}
+        run: python "$LIEF_HELPER" build --work "$LIEF_WORK" --results "$LIEF_RESULTS" --jobs "$BUILD_JOBS"
+      - name: Generate SEA, verify native linkage, and run SEA tests on macOS
+        if: runner.os == 'macOS'
+        env:
+          EXECUTE_SEA: ${{ matrix.execute_sea }}
+        run: |
+          execute_option=--no-execute-sea
+          if [ "$EXECUTE_SEA" = true ]; then execute_option=--execute-sea; fi
+          python "$LIEF_HELPER" test --work "$LIEF_WORK" --results "$LIEF_RESULTS" "$execute_option"
+      - name: Summarize the actual validation coverage
+        if: always()
+        env:
+          JOB_LABEL: ${{ matrix.name }}
+        run: python "$LIEF_HELPER" summary --results "$LIEF_RESULTS" --label "$JOB_LABEL"
+      - name: Upload configure, compiler, linkage and test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: evidence-${{ matrix.name }}
+          path: ${{ env.LIEF_RESULTS }}
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 14
+      - name: Upload built binaries when requested
+        if: always() && inputs.upload_binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: binaries-${{ matrix.name }}
+          path: |
+            ${{ env.LIEF_WORK }}/node/out/Release/node
+            ${{ env.LIEF_WORK }}/node/out/Release/node.exe
+            ${{ env.LIEF_WORK }}/lief-install/lib/*.dll
+            ${{ env.LIEF_WORK }}/lief-install/lib/*.dylib
+            ${{ env.LIEF_WORK }}/sea-smoke
+          if-no-files-found: warn
+          retention-days: 7
+
+  summary:
+    if: always() && github.repository == 'inoway46/node'
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Workflow result
+        env:
+          NODE_SHA: ${{ needs.prepare.outputs.node_sha }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          {
+            echo '## LIEF validation'
+            echo
+            echo "Node revision: $NODE_SHA"
+            echo "Input preparation: $PREPARE_RESULT"
+            echo "Build matrix: $BUILD_RESULT"
+            echo
+            echo 'Each job summary and evidence artifact records configure/build, actual LIEF linkage, SEA generation/execution and test skips.'
+            echo 'The default macOS x64 job verifies build/link and SEA generation; execution remains unverified because of issue 59553.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$PREPARE_RESULT" = success && test "$BUILD_RESULT" = success
