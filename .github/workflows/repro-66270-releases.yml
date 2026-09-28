@@ -1,0 +1,206 @@
+name: Check issue 66270 on released Node.js
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/repro-66270-releases]
+    paths: [.github/workflows/repro-66270-releases.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    if: github.repository == 'inoway46/node'
+    name: Latest v${{ matrix.node }} / Linux x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['26', '24', '22']
+    env:
+      NODE_OPTIONS: ''
+      NODE_PATH: ''
+      NODE_LINE: ${{ matrix.node }}
+    steps:
+      - name: Install latest official release in this major line
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}.x
+          check-latest: true
+
+      - name: Compare disk and inherited VFS worker entries
+        shell: bash
+        run: |
+          mkdir -p results
+          cat > results/repro.cjs <<'NODE'
+          'use strict';
+          const fs = require('node:fs');
+          const os = require('node:os');
+          const path = require('node:path');
+          const { pathToFileURL } = require('node:url');
+          const { spawnSync } = require('node:child_process');
+
+          const results = [];
+          const help = spawnSync(process.execPath, ['--help'], {
+            encoding: 'utf8', timeout: 30000,
+          });
+          if (help.error || help.signal || help.status !== 0) {
+            throw new Error(`Feature detection failed: ${help.error || help.stderr}`);
+          }
+          fs.writeFileSync('results/help.txt', help.stdout);
+          const missingFlags = ['--experimental-vfs', '--vfs-load'].filter(
+            (flag) => !help.stdout.includes(flag));
+          const supportsVfs = missingFlags.length === 0;
+          const metadata = {
+            requestedLine: process.env.NODE_LINE,
+            workflowCommit: process.env.GITHUB_SHA,
+            supportsVfs,
+            missingFlags,
+            version: process.version,
+            versions: process.versions,
+            platform: process.platform,
+            arch: process.arch,
+            executable: process.execPath,
+          };
+          if (!process.version.startsWith(`v${process.env.NODE_LINE}.`)) {
+            throw new Error(`Unexpected Node.js version: ${process.version}`);
+          }
+          const root = fs.mkdtempSync(path.join(os.tmpdir(), 'issue-66270-'));
+          try {
+            const preload = path.join(root, 'noop.mjs');
+            fs.writeFileSync(preload, '');
+            for (const storage of ['disk', 'vfs']) {
+              for (const entry of ['worker.js', 'worker']) {
+                for (const imported of [false, true]) {
+                  const name = `${storage}-${entry}-${imported ? 'import' : 'no-import'}`;
+                  if (storage === 'vfs' && !supportsVfs) {
+                    results.push({ name, storage, entry, imported, verdict: 'UNSUPPORTED' });
+                    continue;
+                  }
+                  const app = path.join(root, name);
+                  fs.mkdirSync(app);
+                  fs.writeFileSync(path.join(app, 'index.js'), `
+            const path = require('node:path');
+            const os = require('node:os');
+            const { Worker } = require('node:worker_threads');
+            const entry = path.join(__dirname, ${JSON.stringify(entry)});
+            const expected = path.join(__dirname, 'worker.js');
+            const inVfs = __dirname.startsWith(path.join(os.devNull, 'vfs') + path.sep);
+            const locationValid = inVfs === ${storage === 'vfs'};
+            console.log(JSON.stringify({ kind: 'parent', entry, expected, inVfs, locationValid }));
+            let messages = 0;
+            let valid = false;
+            const timer = setTimeout(() => process.exit(2), 20000);
+            const worker = new Worker(entry);
+            worker.on('message', (message) => {
+              messages++;
+              valid = message.value === 'ok' && message.filename === expected &&
+                JSON.stringify(message.execArgv) === JSON.stringify(process.execArgv);
+              console.log(JSON.stringify({ kind: 'message', valid, message }));
+            });
+            worker.on('error', (error) => {
+              console.log(JSON.stringify({
+                kind: 'worker-error', code: error.code, message: error.message,
+              }));
+              console.error(error.stack);
+              process.exitCode = 1;
+            });
+            worker.on('exit', (code) => {
+              clearTimeout(timer);
+              console.log(JSON.stringify({ kind: 'exit', code, messages, valid }));
+              if (code !== 0 || messages !== 1 || !valid || !locationValid) process.exitCode = 1;
+            });
+            `);
+                  fs.writeFileSync(path.join(app, 'worker.js'), `
+            require('node:worker_threads').parentPort.postMessage({
+              value: 'ok', filename: __filename, execArgv: process.execArgv,
+            });
+            `);
+                  const args = storage === 'vfs' ? ['--experimental-vfs'] : [];
+                  if (imported) args.push('--import', pathToFileURL(preload).href);
+                  if (storage === 'vfs') args.push('--vfs-load', app);
+                  else args.push(path.join(app, 'index.js'));
+                  const child = spawnSync(process.execPath, args, {
+                    encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL',
+                  });
+                  const stdout = child.stdout || '';
+                  const stderr = child.stderr || '';
+                  const events = [];
+                  let parseError = false;
+                  for (const line of stdout.trim().split('\n').filter(Boolean)) {
+                    try { events.push(JSON.parse(line)); } catch { parseError = true; }
+                  }
+                  const parent = events.find((event) => event.kind === 'parent');
+                  const exited = events.find((event) => event.kind === 'exit');
+                  const workerError = events.find((event) => event.kind === 'worker-error');
+                  let verdict = 'INCONCLUSIVE';
+                  if (!child.error && !child.signal && !parseError && parent?.locationValid) {
+                    if (child.status === 0 && exited?.code === 0 &&
+                        exited.messages === 1 && exited.valid) {
+                      verdict = 'PASS';
+                    } else if (child.status === 1 &&
+                               ['MODULE_NOT_FOUND', 'ERR_MODULE_NOT_FOUND'].includes(workerError?.code) &&
+                               workerError.message.includes(parent.entry)) {
+                      verdict = 'RESOLUTION_FAILURE';
+                    }
+                  }
+                  const result = {
+                    name, storage, entry, imported, args, verdict, status: child.status,
+                    signal: child.signal, error: child.error?.message, events,
+                  };
+                  results.push(result);
+                  fs.writeFileSync(`results/${name}.stdout.log`, stdout);
+                  fs.writeFileSync(`results/${name}.stderr.log`, stderr);
+                  console.log(JSON.stringify(result));
+                }
+              }
+            }
+            function classify(entry) {
+              if (!supportsVfs) return 'UNSUPPORTED';
+              const controls = results.filter((r) => r.entry === entry &&
+                (r.storage === 'disk' || !r.imported));
+              const target = results.find((r) => r.storage === 'vfs' &&
+                r.entry === entry && r.imported);
+              if (!controls.every((r) => r.verdict === 'PASS')) return 'INCONCLUSIVE';
+              if (target.verdict === 'PASS') return 'NOT_REPRODUCED';
+              if (target.verdict === 'RESOLUTION_FAILURE') return 'REPRODUCED';
+              return 'INCONCLUSIVE';
+            }
+            const issueVerdict = classify('worker.js');
+            const extensionlessVerdict = classify('worker');
+            const diskControlsPass = results.filter((r) => r.storage === 'disk')
+              .every((r) => r.verdict === 'PASS');
+            fs.writeFileSync('results/result.json', JSON.stringify({
+              metadata, issueVerdict, extensionlessVerdict, diskControlsPass, results,
+            }, null, 2));
+            const rows = results.map((r) =>
+              `| ${r.storage} | ${r.entry} | ${r.imported} | ${r.verdict} |`).join('\n');
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+              `### ${process.version} / ${process.platform} / ${process.arch}\n\n` +
+              `Issue #66270 (worker.js): **${issueVerdict}**\n\n` +
+              `Extensionless entry (worker): **${extensionlessVerdict}**\n\n` +
+              `Disk controls pass: **${diskControlsPass}**\n\n` +
+              `| Storage | Entry | --import | Result |\n|---|---|---|---|\n${rows}\n\n` +
+              `Missing VFS flags: ${missingFlags.join(', ') || 'none'}\n\n` +
+              'UNSUPPORTED means this release cannot exercise the VFS case, not that it is fixed.\n' +
+              'Both REPRODUCED and INCONCLUSIVE fail the job; inspect the separate verdicts.\n');
+            if (!diskControlsPass || [issueVerdict, extensionlessVerdict]
+              .some((verdict) => ['REPRODUCED', 'INCONCLUSIVE'].includes(verdict))) {
+              process.exitCode = 1;
+            }
+          } finally {
+            fs.rmSync(root, { recursive: true, force: true });
+          }
+          NODE
+          node results/repro.cjs
+
+      - name: Preserve runtime identity, harness, and raw results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: issue-66270-release-v${{ matrix.node }}-linux-x64
+          path: results/
+          if-no-files-found: warn
+          retention-days: 14
