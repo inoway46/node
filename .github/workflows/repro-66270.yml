@@ -1,0 +1,223 @@
+name: Check issue 66270
+
+on:
+  push:
+    branches: [codex/repro-66270]
+    paths: [.github/workflows/repro-66270.yml]
+  workflow_dispatch:
+    inputs:
+      compare_66140:
+        description: Also build the commits immediately before and after PR 66140
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  targets:
+    if: github.repository == 'inoway46/node'
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - id: targets
+        env:
+          COMPARE: ${{ inputs.compare_66140 }}
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          targets = [{"label": "main", "ref": "main"}]
+          if os.environ['COMPARE'] == 'true':
+              targets.extend([
+                  {"label": "before-66140", "ref": "f2051778427047ae7bef80de0f08ae400f8eb47f"},
+                  {"label": "after-66140", "ref": "a18fd89ac5b444391758514f344db3b377bc7a12"},
+              ])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('matrix=' + json.dumps({"include": targets}) + '\n')
+          PY
+
+  reproduce:
+    needs: targets
+    name: ${{ matrix.label }} / Linux x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    env:
+      NODE_OPTIONS: ''
+      NODE_PATH: ''
+      TARGET_LABEL: ${{ matrix.label }}
+    steps:
+      - name: Check out upstream source (not the fork's source)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: nodejs/node
+          ref: ${{ matrix.ref }}
+          persist-credentials: false
+
+      - name: Record source and toolchain
+        run: |
+          mkdir -p results
+          git rev-parse HEAD | tee results/source-sha.txt
+          git log -1 --format=fuller > results/source-commit.txt
+          gcc-13 --version | tee results/compiler.txt
+          python3 --version | tee results/python.txt
+
+      - name: Build the checked-out source
+        env:
+          CC: gcc-13
+          CXX: g++-13
+        run: |
+          set -o pipefail
+          ./configure --v8-disable-temporal-support 2>&1 | tee results/configure.log
+          make -j2 2>&1 | tee results/build.log
+
+      # #66140 was claimed to fix this in #66271, but the fixed load-layer ID
+      # actually landed earlier in #66162 (28994575bcd7). Test behavior rather
+      # than inferring resolution from either commit's presence.
+      - name: Check explicit and extensionless worker entries
+        run: |
+          cat > results/repro.cjs <<'NODE'
+          'use strict';
+          const fs = require('node:fs');
+          const os = require('node:os');
+          const path = require('node:path');
+          const { pathToFileURL } = require('node:url');
+          const { spawnSync } = require('node:child_process');
+
+          const root = fs.mkdtempSync(path.join(os.tmpdir(), 'issue-66270-'));
+          const results = [];
+          const metadata = {
+            label: process.env.TARGET_LABEL,
+            source: fs.readFileSync('results/source-sha.txt', 'utf8').trim(),
+            version: process.version,
+            versions: process.versions,
+            platform: process.platform,
+            arch: process.arch,
+            executable: process.execPath,
+          };
+          try {
+            const preload = path.join(root, 'noop.mjs');
+            fs.writeFileSync(preload, '');
+            for (const entry of ['worker.js', 'worker']) {
+              for (const imported of [false, true]) {
+                const name = `${entry}-${imported ? 'import' : 'no-import'}`;
+                const app = path.join(root, name);
+                fs.mkdirSync(app);
+                fs.writeFileSync(path.join(app, 'index.js'), `
+          const path = require('node:path');
+          const os = require('node:os');
+          const { Worker } = require('node:worker_threads');
+          const entry = path.join(__dirname, ${JSON.stringify(entry)});
+          const expected = path.join(__dirname, 'worker.js');
+          const inVfs = __dirname.startsWith(path.join(os.devNull, 'vfs') + path.sep);
+          console.log(JSON.stringify({ kind: 'parent', entry, expected, inVfs }));
+          let messages = 0;
+          let valid = false;
+          const timer = setTimeout(() => process.exit(2), 20000);
+          const worker = new Worker(entry);
+          worker.on('message', (message) => {
+            messages++;
+            valid = message.value === 'ok' && message.filename === expected &&
+              JSON.stringify(message.execArgv) === JSON.stringify(process.execArgv);
+            console.log(JSON.stringify({ kind: 'message', valid, message }));
+          });
+          worker.on('error', (error) => {
+            console.log(JSON.stringify({
+              kind: 'worker-error', code: error.code, message: error.message,
+            }));
+            console.error(error.stack);
+            process.exitCode = 1;
+          });
+          worker.on('exit', (code) => {
+            clearTimeout(timer);
+            console.log(JSON.stringify({ kind: 'exit', code, messages, valid }));
+            if (code !== 0 || messages !== 1 || !valid || !inVfs) process.exitCode = 1;
+          });
+          `);
+                fs.writeFileSync(path.join(app, 'worker.js'), `
+          require('node:worker_threads').parentPort.postMessage({
+            value: 'ok', filename: __filename, execArgv: process.execArgv,
+          });
+          `);
+                const args = ['--experimental-vfs'];
+                if (imported) args.push('--import', pathToFileURL(preload).href);
+                args.push('--vfs-load', app);
+                const child = spawnSync(process.execPath, args, {
+                  encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL',
+                });
+                const stdout = child.stdout || '';
+                const stderr = child.stderr || '';
+                const events = [];
+                let parseError = false;
+                for (const line of stdout.trim().split('\n').filter(Boolean)) {
+                  try { events.push(JSON.parse(line)); } catch { parseError = true; }
+                }
+                const parent = events.find((event) => event.kind === 'parent');
+                const exited = events.find((event) => event.kind === 'exit');
+                const workerError = events.find((event) => event.kind === 'worker-error');
+                let verdict = 'INCONCLUSIVE';
+                if (!child.error && !child.signal && !parseError && parent?.inVfs) {
+                  if (child.status === 0 && exited?.code === 0 &&
+                      exited.messages === 1 && exited.valid) {
+                    verdict = 'PASS';
+                  } else if (child.status === 1 &&
+                             ['MODULE_NOT_FOUND', 'ERR_MODULE_NOT_FOUND'].includes(workerError?.code) &&
+                             workerError.message.includes(parent.entry)) {
+                    verdict = 'RESOLUTION_FAILURE';
+                  }
+                }
+                const result = {
+                  name, entry, imported, args, verdict, status: child.status,
+                  signal: child.signal, error: child.error?.message, events,
+                };
+                results.push(result);
+                fs.writeFileSync(`results/${name}.stdout.log`, stdout);
+                fs.writeFileSync(`results/${name}.stderr.log`, stderr);
+                console.log(JSON.stringify(result));
+              }
+            }
+            function classify(entry) {
+              const control = results.find((r) => r.entry === entry && !r.imported);
+              const target = results.find((r) => r.entry === entry && r.imported);
+              if (control.verdict !== 'PASS') return 'INCONCLUSIVE';
+              if (target.verdict === 'PASS') return 'NOT_REPRODUCED';
+              if (target.verdict === 'RESOLUTION_FAILURE') return 'REPRODUCED';
+              return 'INCONCLUSIVE';
+            }
+            const issueVerdict = classify('worker.js');
+            const extensionlessVerdict = classify('worker');
+            fs.writeFileSync('results/result.json', JSON.stringify({
+              metadata, issueVerdict, extensionlessVerdict, results,
+            }, null, 2));
+            const rows = results.map((r) => `| ${r.entry} | ${r.imported} | ${r.verdict} |`).join('\n');
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+              `### ${metadata.label}\n\n` +
+              `Issue #66270 (worker.js): **${issueVerdict}**\n\n` +
+              `PR #66271 additional case (worker): **${extensionlessVerdict}**\n\n` +
+              `Source: \`${metadata.source}\`; ${process.version} / ${process.platform} / ${process.arch}\n\n` +
+              `| Entry | --import | Result |\n|---|---|---|\n${rows}\n\n` +
+              'NOT_REPRODUCED covers these Linux cases only; it does not establish release availability.\n' +
+              'Only the original issue case gates main; extensionless behavior is reported separately.\n' +
+              'Historical REPRODUCED is an observation, not a job failure. INCONCLUSIVE always fails.\n');
+            if ([issueVerdict, extensionlessVerdict].includes('INCONCLUSIVE') ||
+                (metadata.label === 'main' && issueVerdict !== 'NOT_REPRODUCED')) {
+              process.exitCode = 1;
+            }
+          } finally {
+            fs.rmSync(root, { recursive: true, force: true });
+          }
+          NODE
+          out/Release/node results/repro.cjs
+
+      - name: Preserve source identity, harness, and raw results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: issue-66270-${{ matrix.label }}
+          path: results/
+          if-no-files-found: warn
+          retention-days: 14
