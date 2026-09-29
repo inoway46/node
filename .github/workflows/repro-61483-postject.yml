@@ -14,6 +14,8 @@ jobs:
     if: github.repository == 'inoway46/node'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
+    env:
+      DEVCONTAINER_IMAGE: nodejs/devcontainer@sha256:4d14036c481cc61980a468079804111a91c046876c9738a769a41de926695aeb
     defaults:
       run:
         shell: bash
@@ -41,7 +43,12 @@ jobs:
             binutils gcc python3 python3-pyelftools >> apt.log 2>&1
           gcc --version > compiler.txt
           npm --version > npm-version.txt
-          npm install --prefix /results/postject --ignore-scripts --no-audit --no-fund postject > npm-install.log 2>&1
+          mkdir -p /results/postject
+          cat > /results/postject/package.json <<'JSON'
+          {"name":"issue-61483-reproducer","private":true,"dependencies":{"postject":"latest"}}
+          JSON
+          (cd /results/postject && npm install --ignore-scripts --no-audit --no-fund) > npm-install.log 2>&1
+          test -x /results/postject/node_modules/.bin/postject
           node -p 'require("/results/postject/node_modules/postject/package.json").version' > postject-version.txt
           gcc -shared -fPIC -I/work/src /work/test/node-api/1_hello_world/binding.c -o binding.node
           python3 /results/reproduce.py
@@ -155,7 +162,8 @@ jobs:
               lines.append(f"| {name} | {r.get('hash_preserved')} | {elf.get('bloom_zero')} | "
                            f"{elf.get('buckets_zero')} | {r.get('execution', {}).get('code')} |")
           lines += ['', 'The hello case follows the issue commands; the addon case also calls an N-API function.',
-                    'This uses the currently published nightly image and postject package, not pinned historical versions.',
+                    'The image digest is pinned to the first attempt; postject resolves latest and is recorded in the lockfile.',
+                    'These are not the historical versions from the original issue.',
                     'See image inspection, package-lock.json and raw logs in the artifact.']
           (root / 'summary.md').write_text('\n'.join(lines) + '\n')
           if verdict == 'INCONCLUSIVE':
@@ -165,11 +173,11 @@ jobs:
       - name: Run the published devcontainer on native arm64
         run: |
           set -o pipefail
-          docker pull --platform linux/arm64 nodejs/devcontainer:nightly 2>&1 | tee results/image-pull.log
-          docker image inspect nodejs/devcontainer:nightly > results/image.json
+          docker pull --platform linux/arm64 "$DEVCONTAINER_IMAGE" 2>&1 | tee results/image-pull.log
+          docker image inspect "$DEVCONTAINER_IMAGE" > results/image.json
           docker run --rm --platform linux/arm64 --user 0 --entrypoint bash \
             -v "$PWD:/work:ro" -v "$PWD/results:/results" \
-            nodejs/devcontainer:nightly /results/run.sh 2>&1 | tee results/run.log
+            "$DEVCONTAINER_IMAGE" /results/run.sh 2>&1 | tee results/run.log
 
       - name: Report results
         if: always()
