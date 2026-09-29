@@ -1,0 +1,244 @@
+name: Check issue 61483 GNU hash rebuild
+
+on:
+  push:
+    branches: [codex/repro-61483]
+    paths: [.github/workflows/repro-61483.yml]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: nodejs/node ref or SHA (defaults to current main)
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    if: github.repository == 'inoway46/node'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: nodejs/node
+          ref: ${{ inputs.source_ref || 'main' }}
+          persist-credentials: false
+
+      - name: Prepare Docker experiment
+        run: |
+          mkdir -p results
+          git rev-parse HEAD > results/source-sha.txt
+          git log -1 --format=fuller > results/source-commit.txt
+          cp deps/LIEF/include/LIEF/version.h results/lief-version.h
+          cat > results/Dockerfile <<'DOCKER'
+          FROM ubuntu:24.04
+          RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              g++-13 gcc-13 make python3 python3-pyelftools binutils llvm ca-certificates git \
+              && rm -rf /var/lib/apt/lists/*
+          ENV CC=gcc-13 CXX=g++-13
+          WORKDIR /work
+          DOCKER
+          cat > results/probe.cjs <<'JS'
+          'use strict';
+          const assert = require('node:assert/strict');
+          console.log('SEA_STARTED');
+          if (process.env.PROBE_ADDON === '1') {
+            const binding = { exports: {} };
+            process.dlopen(binding, '/work/results/binding.node');
+            assert.equal(binding.exports.hello(), 'world');
+            console.log('ADDON_OK');
+          }
+          JS
+          cat > results/experiment.sh <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          { uname -a; cat /etc/os-release; gcc-13 --version; ldd --version; } > results/environment.txt
+          ./configure --v8-disable-temporal-support 2>&1 | tee results/configure.log
+          make -j2 2>&1 | tee results/build-baseline.log
+          cp out/Release/node results/original-node
+          results/original-node -p 'JSON.stringify(process.versions)' > results/node-versions.json
+          gcc-13 -shared -fPIC -Isrc test/node-api/1_hello_world/binding.c -o results/binding.node
+          # Baseline and modified producers inject into this exact same executable.
+          python3 results/measure.py baseline results/original-node
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('src/node_sea_bin.cc')
+          text = source.read_text()
+          start = text.index('InjectOutput InjectIntoELF(')
+          end = text.index('InjectOutput InjectIntoMachO(', start)
+          elf = text[start:end]
+          anchor = '  cfg.dynamic_section = true;'
+          assert elf.count(anchor) == 1, 'Unexpected ELF builder config'
+          assert 'cfg.gnu_hash' not in elf, 'Source already changes GNU hash config'
+          elf = elf.replace(anchor, '  cfg.gnu_hash = false;\n' + anchor)
+          source.write_text(text[:start] + elf + text[end:])
+          PY
+          git diff -- src/node_sea_bin.cc > results/experiment.patch
+          make -j2 2>&1 | tee results/build-no-gnu-hash.log
+          python3 results/measure.py no-gnu-hash out/Release/node
+          python3 results/compare.py
+          SH
+          cat > results/measure.py <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import struct
+          import subprocess
+          import sys
+          from elftools.elf.elffile import ELFFile
+
+          root = Path('/work/results')
+          label, producer = sys.argv[1:]
+          dest = root / label
+          dest.mkdir()
+
+          def run(name, args, addon=False):
+              env = dict(os.environ, PROBE_ADDON='1' if addon else '0')
+              try:
+                  p = subprocess.run(args, capture_output=True, timeout=180, env=env)
+                  code, stdout, stderr = p.returncode, p.stdout, p.stderr
+              except subprocess.TimeoutExpired as error:
+                  code, stdout, stderr = 124, error.stdout or b'', error.stderr or b''
+              (dest / (name + '.stdout.log')).write_bytes(stdout)
+              (dest / (name + '.stderr.log')).write_bytes(stderr)
+              return {'code': code, 'started': b'SEA_STARTED' in stdout,
+                      'addon_ok': b'ADDON_OK' in stdout}
+
+          def inspect(path, name):
+              for suffix, args in [
+                  ('headers', ['readelf', '-W', '-S', '-l', '-d']),
+                  ('gnu-hash', ['readelf', '-x', '.gnu.hash']),
+                  ('dynsym', ['readelf', '-W', '--dyn-syms']),
+                  ('llvm-hash', ['llvm-readelf', '--gnu-hash-table']),
+              ]:
+                  result = run(name + '-' + suffix, args + [str(path)])
+                  if result['code'] != 0:
+                      raise RuntimeError(f'{name} {suffix}: inspection failed')
+              with path.open('rb') as stream:
+                  elf = ELFFile(stream)
+                  assert elf.elfclass == 64 and elf.little_endian
+                  section = elf.get_section_by_name('.gnu.hash')
+                  raw = section.data()
+                  (dest / (name + '.gnu.hash.bin')).write_bytes(raw)
+                  buckets, symoffset, words, shift = struct.unpack_from('<4I', raw)
+                  assert buckets > 0 and words > 0
+                  end = 16 + words * 8 + buckets * 4
+                  assert end <= len(raw)
+                  bloom = raw[16:16 + words * 8]
+                  bucket_data = raw[16 + words * 8:end]
+                  symbols = elf.get_section_by_name('.dynsym')
+                  names = [symbol.name for symbol in symbols.iter_symbols()]
+                  (dest / (name + '.dynsym.json')).write_text(json.dumps(names, indent=2))
+                  (dest / (name + '.dynsym.bin')).write_bytes(symbols.data())
+                  return {
+                      'sha256': hashlib.sha256(raw).hexdigest(),
+                      'size': section['sh_size'], 'offset': section['sh_offset'],
+                      'buckets': buckets, 'symoffset': symoffset,
+                      'bloom_words': words, 'shift': shift,
+                      'bloom_zero': not any(bloom), 'buckets_zero': not any(bucket_data),
+                  }
+
+          result = {'label': label, 'original': inspect(root / 'original-node', 'original')}
+          result['control'] = run('control', [str(root / 'original-node'), str(root / 'probe.cjs')], True)
+          config = {'main': str(root / 'probe.cjs'), 'output': str(dest / 'sea'),
+                    'executable': str(root / 'original-node'),
+                    'disableExperimentalSEAWarning': True}
+          (dest / 'config.json').write_text(json.dumps(config))
+          result['build'] = run('build', [producer, '--build-sea', str(dest / 'config.json')])
+          if result['build']['code'] == 0 and (dest / 'sea').exists():
+              (dest / 'sea').chmod(0o755)
+              result['sea'] = inspect(dest / 'sea', 'sea')
+              result['startup'] = run('startup', [str(dest / 'sea')])
+              result['addon'] = run('addon', [str(dest / 'sea')], True)
+              for section in ['gnu.hash.bin', 'dynsym.bin', 'dynsym.json']:
+                  result[section + '_unchanged'] = (
+                      (dest / ('original.' + section)).read_bytes() ==
+                      (dest / ('sea.' + section)).read_bytes())
+          (dest / 'result.json').write_text(json.dumps(result, indent=2))
+          PY
+          cat > results/compare.py <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path('/work/results')
+          a, b = [json.loads((root / label / 'result.json').read_text())
+                  for label in ['baseline', 'no-gnu-hash']]
+
+          def passed(run, marker):
+              return run.get('code') == 0 and run.get(marker) is True
+
+          def usable(r):
+              return (passed(r['control'], 'addon_ok') and 'sea' in r and
+                      passed(r['startup'], 'started') and
+                      not r['original']['bloom_zero'] and not r['original']['buckets_zero'])
+
+          def corrupt(r):
+              return r['sea']['bloom_zero'] or r['sea']['buckets_zero']
+
+          verdict = 'INCONCLUSIVE'
+          if usable(a) and usable(b):
+              if corrupt(a) and not passed(a['addon'], 'addon_ok'):
+                  if (not corrupt(b) and passed(b['addon'], 'addon_ok') and
+                          b['gnu.hash.bin_unchanged'] and b['dynsym.json_unchanged']):
+                      verdict = 'CORRUPTION_AVOIDED_IN_THIS_EXPERIMENT'
+                  else:
+                      verdict = 'NOT_RESOLVED_OR_SYMBOL_ORDER_CHANGED'
+              elif not corrupt(a) and passed(a['addon'], 'addon_ok'):
+                  verdict = 'BASELINE_NOT_REPRODUCED'
+          lines = ['## Issue #61483: GNU hash rebuild experiment', '',
+                   f'**{verdict}**', '',
+                   'Source: `' + (root / 'source-sha.txt').read_text().strip() + '`', '',
+                   '| Variant | Bloom zero | Buckets zero | Hash preserved | Symbol order preserved | Addon call |',
+                   '|---|---|---|---|---|---|']
+          for r in [a, b]:
+              sea = r.get('sea', {})
+              lines.append(f"| {r['label']} | {sea.get('bloom_zero')} | {sea.get('buckets_zero')} | "
+                           f"{r.get('gnu.hash.bin_unchanged')} | {r.get('dynsym.json_unchanged')} | "
+                           f"{r.get('addon')} |")
+          lines += ['', 'This tests --build-sea on Ubuntu 24.04 in native arm64 Docker.',
+                    'The original issue used postject and the Node.js devcontainer image.',
+                    'No baseline reproduction means no conclusion about the workaround.',
+                    'Preserved hash and symbol order plus one addon are evidence, not proof of a safe final fix.',
+                    'See artifacts for raw ELF dumps, section offsets/sizes, logs and the exact patch.']
+          (root / 'summary.md').write_text('\n'.join(lines) + '\n')
+          (root / 'comparison.json').write_text(json.dumps({'verdict': verdict, 'variants': [a, b]}, indent=2))
+          # Reproduction is an observation; harness failures must fail the job.
+          if verdict == 'INCONCLUSIVE':
+              raise SystemExit(1)
+          PY
+
+      - name: Build and compare inside native arm64 Docker
+        run: |
+          set -o pipefail
+          docker build --pull -t sea-61483 -f results/Dockerfile results 2>&1 | tee results/docker-build.log
+          docker image inspect sea-61483 > results/docker-image.json
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD:/work" sea-61483 bash results/experiment.sh 2>&1 | tee results/experiment.log
+
+      - name: Publish comparison summary
+        if: always()
+        run: |
+          if [ -f results/summary.md ]; then
+            cat results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'INCONCLUSIVE: experiment did not finish; inspect the build and probe logs.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Preserve evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: issue-61483-gnu-hash
+          path: |
+            results/
+            !results/original-node
+            !results/*/sea
+          retention-days: 14
+          if-no-files-found: warn
