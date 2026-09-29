@@ -40,7 +40,7 @@ jobs:
           # Install inspection tools only; keep the image's Node.js and npm.
           apt-get update > apt.log 2>&1
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            binutils gcc python3 python3-pyelftools >> apt.log 2>&1
+            binutils gcc libc6-dev python3 python3-pyelftools >> apt.log 2>&1
           gcc --version > compiler.txt
           npm --version > npm-version.txt
           mkdir -p /results/postject
