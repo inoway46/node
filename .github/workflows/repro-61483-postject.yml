@@ -45,7 +45,7 @@ jobs:
           npm --version > npm-version.txt
           mkdir -p /results/postject
           cat > /results/postject/package.json <<'JSON'
-          {"name":"issue-61483-reproducer","private":true,"dependencies":{"postject":"latest"}}
+          {"name":"issue-61483-reproducer","private":true,"dependencies":{"postject":"1.0.0-alpha.6"}}
           JSON
           (cd /results/postject && npm install --ignore-scripts --no-audit --no-fund) > npm-install.log 2>&1
           test -x /results/postject/node_modules/.bin/postject
@@ -162,7 +162,7 @@ jobs:
               lines.append(f"| {name} | {r.get('hash_preserved')} | {elf.get('bloom_zero')} | "
                            f"{elf.get('buckets_zero')} | {r.get('execution', {}).get('code')} |")
           lines += ['', 'The hello case follows the issue commands; the addon case also calls an N-API function.',
-                    'The image digest is pinned to the first attempt; postject resolves latest and is recorded in the lockfile.',
+                    'The image digest and postject version are pinned to the previous attempt.',
                     'These are not the historical versions from the original issue.',
                     'See image inspection, package-lock.json and raw logs in the artifact.']
           (root / 'summary.md').write_text('\n'.join(lines) + '\n')
@@ -182,8 +182,10 @@ jobs:
       - name: Report results
         if: always()
         run: |
+          sudo find results -maxdepth 1 -type f -exec chmod a+r {} +
           if [ -f results/summary.md ]; then
-            cat results/summary.md >> "$GITHUB_STEP_SUMMARY"
+            tee -a "$GITHUB_STEP_SUMMARY" < results/summary.md
+            cat results/result.json
           else
             echo 'INCONCLUSIVE: setup or harness failed; see artifact logs.' >> "$GITHUB_STEP_SUMMARY"
           fi
