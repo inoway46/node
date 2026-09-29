@@ -85,7 +85,7 @@ jobs:
             echo 'to format the commits in your branch.'
             exit "$EXIT_CODE"
           fi
-  lint-js-and-md:
+  lint-js:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-slim
     steps:
@@ -97,15 +97,18 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Lint JavaScript files
+        env:
+          # lint-md checks doc through its lint-js-doc prerequisite.
+          LINT_JS_TARGETS: eslint.config.mjs benchmark lib test tools
         run: |
           set +e
-          NODE=$(command -v node) make lint-js
+          NODE=$(command -v node) make lint-js LINT_JS_TARGETS="$LINT_JS_TARGETS"
           EXIT_CODE="$?"
           if [ "$EXIT_CODE" != "0" ]; then
             echo
             echo 'ERROR: The JavaScript lint validation failed (the errors are logged above).'
             echo '       Please fix the lint errors.'
-            if NODE=$(command -v node) make lint-js-fix > /dev/null 2>&1; then
+            if NODE=$(command -v node) make lint-js-fix LINT_JS_TARGETS="$LINT_JS_TARGETS" > /dev/null 2>&1; then
               echo '       Run:'
               echo '          make lint-js-fix'
               echo '       to fix the lint issues.'
@@ -122,6 +125,17 @@ jobs:
             echo
             exit "$EXIT_CODE"
           fi
+  lint-md:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - name: Get release version numbers
         if: ${{ github.event.pull_request && github.event.pull_request.base.ref == github.event.pull_request.base.repo.default_branch }}
         id: get-released-versions
