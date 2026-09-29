@@ -1,0 +1,192 @@
+name: Check issue 61483 with postject
+
+on:
+  push:
+    branches: [codex/repro-61483-postject]
+    paths: [.github/workflows/repro-61483-postject.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    if: github.repository == 'inoway46/node'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare original issue reproducer and addon probe
+        run: |
+          mkdir -p results
+          git rev-parse HEAD > results/harness-sha.txt
+          cat > results/run.sh <<'SH'
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          cd /results
+          command -v node > node-path.txt
+          node -p 'JSON.stringify({version:process.version,versions:process.versions,arch:process.arch,execPath:process.execPath})' > node-version.json
+          cp "$(command -v node)" original-node
+          sha256sum original-node > original-node.sha256
+          { uname -a; cat /etc/os-release; } > environment.txt
+          # Install inspection tools only; keep the image's Node.js and npm.
+          apt-get update > apt.log 2>&1
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            binutils gcc python3 python3-pyelftools >> apt.log 2>&1
+          gcc --version > compiler.txt
+          npm --version > npm-version.txt
+          npm install --prefix /results/postject --ignore-scripts --no-audit --no-fund postject > npm-install.log 2>&1
+          node -p 'require("/results/postject/node_modules/postject/package.json").version' > postject-version.txt
+          gcc -shared -fPIC -I/work/src /work/test/node-api/1_hello_world/binding.c -o binding.node
+          python3 /results/reproduce.py
+          SH
+          cat > results/reproduce.py <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import struct
+          import subprocess
+          from elftools.elf.elffile import ELFFile
+
+          root = Path('/results')
+
+          def run(name, args):
+              try:
+                  p = subprocess.run(args, capture_output=True, timeout=120)
+                  code, stdout, stderr = p.returncode, p.stdout, p.stderr
+              except subprocess.TimeoutExpired as error:
+                  code, stdout, stderr = 124, error.stdout or b'', error.stderr or b''
+              (root / (name + '.stdout.log')).write_bytes(stdout)
+              (root / (name + '.stderr.log')).write_bytes(stderr)
+              return {'code': code, 'stdout': stdout.decode(errors='replace'),
+                      'stderr': stderr.decode(errors='replace')}
+
+          def inspect(binary, label):
+              for suffix, args in [('hash', ['-x', '.gnu.hash']),
+                                   ('headers', ['-W', '-S', '-l', '-d']),
+                                   ('dynsym', ['-W', '--dyn-syms'])]:
+                  result = run(label + '-' + suffix, ['readelf', *args, str(binary)])
+                  assert result['code'] == 0, result
+              with binary.open('rb') as stream:
+                  elf = ELFFile(stream)
+                  assert elf.elfclass == 64 and elf.little_endian
+                  section = elf.get_section_by_name('.gnu.hash')
+                  raw = section.data()
+                  (root / (label + '.gnu.hash.bin')).write_bytes(raw)
+                  buckets, symoffset, words, shift = struct.unpack_from('<4I', raw)
+                  assert buckets > 0 and words > 0
+                  end = 16 + words * 8 + buckets * 4
+                  assert end <= len(raw)
+                  symbols = elf.get_section_by_name('.dynsym')
+                  (root / (label + '.dynsym.json')).write_text(json.dumps(
+                      [s.name for s in symbols.iter_symbols()], indent=2))
+                  return {'sha256': hashlib.sha256(raw).hexdigest(),
+                          'size': section['sh_size'], 'offset': section['sh_offset'],
+                          'buckets': buckets, 'symoffset': symoffset,
+                          'bloom_words': words, 'shift': shift,
+                          'bloom_zero': not any(raw[16:16 + words * 8]),
+                          'buckets_zero': not any(raw[16 + words * 8:end])}
+
+          (root / 'hello.js').write_text('console.log("hello");\n')
+          (root / 'addon.js').write_text('''
+          const assert = require('node:assert/strict');
+          console.log('SEA_STARTED');
+          const binding = { exports: {} };
+          process.dlopen(binding, '/results/binding.node');
+          assert.equal(binding.exports.hello(), 'world');
+          console.log('ADDON_OK');
+          ''')
+          original = inspect(root / 'original-node', 'original')
+          control = run('control', ['./original-node', 'addon.js'])
+          results = {}
+          for name in ['hello', 'addon']:
+              config = {'main': './' + name + '.js', 'output': './' + name + '.blob'}
+              (root / (name + '-config.json')).write_text(json.dumps(config))
+              result = {'blob': run(name + '-blob', ['node', '--experimental-sea-config', name + '-config.json'])}
+              if result['blob']['code'] == 0:
+                  binary = root / (name + '-sea')
+                  shutil.copy2(root / 'original-node', binary)
+                  result['inject'] = run(name + '-inject', [
+                      '/results/postject/node_modules/.bin/postject', str(binary),
+                      'NODE_SEA_BLOB', name + '.blob', '--sentinel-fuse',
+                      'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2'])
+                  if result['inject']['code'] == 0:
+                      result['elf'] = inspect(binary, name)
+                      result['execution'] = run(name + '-execute', [str(binary)])
+                      result['hash_preserved'] = original['sha256'] == result['elf']['sha256']
+                      result['symbol_order_preserved'] = (
+                          (root / 'original.dynsym.json').read_bytes() ==
+                          (root / (name + '.dynsym.json')).read_bytes())
+              results[name] = result
+              (root / (name + '-result.json')).write_text(json.dumps(result, indent=2))
+
+          def passed(result, marker):
+              return result.get('code') == 0 and marker in result.get('stdout', '').splitlines()
+
+          verdict = 'INCONCLUSIVE'
+          if (passed(control, 'ADDON_OK') and not original['bloom_zero'] and
+                  not original['buckets_zero'] and all('elf' in r for r in results.values())):
+              corrupted = any(r['elf']['bloom_zero'] or r['elf']['buckets_zero'] for r in results.values())
+              addon = results['addon']['execution']
+              if corrupted:
+                  verdict = 'GNU_HASH_ZEROING_REPRODUCED'
+                  if 'undefined symbol: napi_' in addon['stderr'] and addon['code'] != 0:
+                      verdict = 'HASH_ZEROING_AND_NAPI_LOAD_FAILURE_REPRODUCED'
+              elif (all(r['hash_preserved'] for r in results.values()) and
+                    passed(results['hello']['execution'], 'hello') and passed(addon, 'ADDON_OK')):
+                  verdict = 'NOT_REPRODUCED'
+          report = {'verdict': verdict, 'original': original, 'control': control, 'cases': results}
+          (root / 'result.json').write_text(json.dumps(report, indent=2))
+          lines = ['## Issue #61483: devcontainer + postject', '', '**' + verdict + '**', '',
+                   'Node: `' + (root / 'node-version.json').read_text().strip() + '`', '',
+                   'postject: `' + (root / 'postject-version.txt').read_text().strip() + '`', '',
+                   '| Case | Hash preserved | Bloom zero | Buckets zero | Execution exit |',
+                   '|---|---|---|---|---|']
+          for name, r in results.items():
+              elf = r.get('elf', {})
+              lines.append(f"| {name} | {r.get('hash_preserved')} | {elf.get('bloom_zero')} | "
+                           f"{elf.get('buckets_zero')} | {r.get('execution', {}).get('code')} |")
+          lines += ['', 'The hello case follows the issue commands; the addon case also calls an N-API function.',
+                    'This uses the currently published nightly image and postject package, not pinned historical versions.',
+                    'See image inspection, package-lock.json and raw logs in the artifact.']
+          (root / 'summary.md').write_text('\n'.join(lines) + '\n')
+          if verdict == 'INCONCLUSIVE':
+              raise SystemExit(1)
+          PY
+
+      - name: Run the published devcontainer on native arm64
+        run: |
+          set -o pipefail
+          docker pull --platform linux/arm64 nodejs/devcontainer:nightly 2>&1 | tee results/image-pull.log
+          docker image inspect nodejs/devcontainer:nightly > results/image.json
+          docker run --rm --platform linux/arm64 --user 0 --entrypoint bash \
+            -v "$PWD:/work:ro" -v "$PWD/results:/results" \
+            nodejs/devcontainer:nightly /results/run.sh 2>&1 | tee results/run.log
+
+      - name: Report results
+        if: always()
+        run: |
+          if [ -f results/summary.md ]; then
+            cat results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'INCONCLUSIVE: setup or harness failed; see artifact logs.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: issue-61483-postject
+          path: |
+            results/
+            !results/postject/node_modules/
+            !results/original-node
+            !results/*-sea
+          retention-days: 14
