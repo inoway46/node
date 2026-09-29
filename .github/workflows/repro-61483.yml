@@ -18,7 +18,7 @@ jobs:
   compare:
     if: github.repository == 'inoway46/node'
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 180
+    timeout-minutes: 360
     defaults:
       run:
         shell: bash
@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: nodejs/node
-          ref: ${{ inputs.source_ref || 'main' }}
+          ref: ${{ inputs.source_ref || '691cf6245ce585cba223192e944b6dd38e9ec71a' }}
           persist-credentials: false
 
       - name: Prepare Docker experiment
@@ -60,7 +60,7 @@ jobs:
           test "$(uname -m)" = aarch64
           { uname -a; cat /etc/os-release; gcc-13 --version; ldd --version; } > results/environment.txt
           ./configure --v8-disable-temporal-support 2>&1 | tee results/configure.log
-          make -j2 2>&1 | tee results/build-baseline.log
+          make -j4 2>&1 | tee results/build-baseline.log
           cp out/Release/node results/original-node
           results/original-node -p 'JSON.stringify(process.versions)' > results/node-versions.json
           gcc-13 -shared -fPIC -Isrc test/node-api/1_hello_world/binding.c -o results/binding.node
@@ -80,7 +80,7 @@ jobs:
           source.write_text(text[:start] + elf + text[end:])
           PY
           git diff -- src/node_sea_bin.cc > results/experiment.patch
-          make -j2 2>&1 | tee results/build-no-gnu-hash.log
+          make -j4 2>&1 | tee results/build-no-gnu-hash.log
           python3 results/measure.py no-gnu-hash out/Release/node
           python3 results/compare.py
           SH
