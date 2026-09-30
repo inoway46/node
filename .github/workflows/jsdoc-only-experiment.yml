@@ -1,0 +1,70 @@
+name: JSDoc optimization experiment
+
+on:
+  push:
+    branches:
+      - codex/jsdoc-only-experiment-batch-1
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: 24.21.0
+
+jobs:
+  combined-slim:
+    runs-on: ubuntu-slim
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        trial: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Lint JavaScript files
+        run: |
+          set -e
+          NODE=$(command -v node) make tools/eslint/node_modules/eslint/bin/eslint.js
+          node -e "require('node:assert/strict').equal(require('./tools/eslint/node_modules/eslint-plugin-jsdoc/package.json').version, '64.3.10')"
+          git apply --check --directory=tools/eslint/node_modules/eslint-plugin-jsdoc .github/experiments/jsdoc-empty-fastpath.patch
+          git apply --directory=tools/eslint/node_modules/eslint-plugin-jsdoc .github/experiments/jsdoc-empty-fastpath.patch
+          git apply --reverse --check --directory=tools/eslint/node_modules/eslint-plugin-jsdoc .github/experiments/jsdoc-empty-fastpath.patch
+          set +e
+          NODE=$(command -v node) make lint-js
+          EXIT_CODE="$?"
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo
+            echo 'ERROR: The JavaScript lint validation failed (the errors are logged above).'
+            echo '       Please fix the lint errors.'
+            if NODE=$(command -v node) make lint-js-fix > /dev/null 2>&1; then
+              echo '       Run:'
+              echo '          make lint-js-fix'
+              echo '       to fix the lint issues.'
+              git --no-pager diff
+            elif git diff --quiet --exit-code; then
+              echo '       None of the issue is auto-fixable, so manual fixes for'
+              echo '       all of the issues are required.'
+            else
+              echo '       Run:'
+              echo '          make lint-js-fix'
+              echo '       to fix the auto-fixable lint issues.'
+              echo '       Note that some manual fixes are also required.'
+            fi
+            echo
+            exit "$EXIT_CODE"
+          fi
+      - name: Get release version numbers
+        id: get-released-versions
+        run: ./tools/lint-md/list-released-versions-from-changelogs.mjs >> $GITHUB_OUTPUT
+      - name: Lint markdown files
+        run: |
+          echo "::add-matcher::.github/workflows/remark-lint-problem-matcher.json"
+          NODE=$(command -v node) make lint-md
+        env:
+          NODE_RELEASED_VERSIONS: ${{ steps.get-released-versions.outputs.NODE_RELEASED_VERSIONS }}

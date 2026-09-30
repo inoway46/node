@@ -1,0 +1,24 @@
+--- a/src/iterateJsdoc.js
++++ b/src/iterateJsdoc.js
+@@ -2360,7 +2360,7 @@
+       const trackedJsdocs = new Set();
+       const state = {};
+ 
+-      return {
++      const listeners = {
+         /**
+          * @param {import('eslint').Rule.Node} node
+          * @returns {void}
+@@ -2409,6 +2409,12 @@
+           );
+         },
+       };
++      if (!ruleConfig.nonComment && !sourceCode.getAllComments().some(
++        (comment) => /^\/\*\*\s/v.test(sourceCode.getText(comment))
++      )) {
++        delete listeners['*:not(Program)'];
++      }
++      return listeners;
+     },
+     meta: ruleConfig.meta,
+   };
