@@ -1,9 +1,9 @@
-name: Must-call-assert optimization experiment
+name: Must-call-assert ARM optimization experiment
 
 on:
   push:
     branches:
-      - codex/must-call-assert-experiment-batch-*
+      - codex/must-call-assert-arm-experiment-batch-*
 
 permissions:
   contents: read
@@ -12,8 +12,8 @@ env:
   NODE_VERSION: 24.21.0
 
 jobs:
-  combined-slim:
-    runs-on: ubuntu-slim
+  combined-arm:
+    runs-on: ubuntu-26.04-arm
     strategy:
       fail-fast: false
       max-parallel: 5
