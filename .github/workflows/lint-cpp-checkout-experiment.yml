@@ -1,0 +1,280 @@
+name: Lint C++ checkout experiment
+
+on:
+  push:
+    branches: [codex/lint-cpp-checkout-benchmark-20261003]
+    paths: [.github/workflows/lint-cpp-checkout-experiment.yml]
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: '3.14'
+  SOURCE_SHA: 1f26576a3f13b8cc0d09b443efcfc071c667b35f
+
+jobs:
+  full:
+    if: github.repository == 'inoway46/node'
+    name: lint-cpp / full / ${{ matrix.trial }}
+    runs-on: ubuntu-slim
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        trial:
+          - 1
+          - 2
+          - 3
+          - 4
+          - 5
+          - 6
+          - 7
+          - 8
+          - 9
+          - 10
+          - 11
+          - 12
+          - 13
+          - 14
+          - 15
+          - 16
+          - 17
+          - 18
+          - 19
+          - 20
+          - 21
+          - 22
+          - 23
+          - 24
+          - 25
+          - 26
+          - 27
+          - 28
+          - 29
+          - 30
+          - 31
+          - 32
+          - 33
+          - 34
+          - 35
+          - 36
+          - 37
+          - 38
+          - 39
+          - 40
+          - 41
+          - 42
+          - 43
+          - 44
+          - 45
+          - 46
+          - 47
+          - 48
+          - 49
+          - 50
+          - 51
+          - 52
+          - 53
+          - 54
+          - 55
+          - 56
+          - 57
+          - 58
+          - 59
+          - 60
+          - 61
+          - 62
+          - 63
+          - 64
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
+      - name: Lint C/C++ files
+        run: make lint-cpp
+
+  sparse:
+    if: github.repository == 'inoway46/node'
+    name: lint-cpp / sparse / ${{ matrix.trial }}
+    runs-on: ubuntu-slim
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        trial:
+          - 1
+          - 2
+          - 3
+          - 4
+          - 5
+          - 6
+          - 7
+          - 8
+          - 9
+          - 10
+          - 11
+          - 12
+          - 13
+          - 14
+          - 15
+          - 16
+          - 17
+          - 18
+          - 19
+          - 20
+          - 21
+          - 22
+          - 23
+          - 24
+          - 25
+          - 26
+          - 27
+          - 28
+          - 29
+          - 30
+          - 31
+          - 32
+          - 33
+          - 34
+          - 35
+          - 36
+          - 37
+          - 38
+          - 39
+          - 40
+          - 41
+          - 42
+          - 43
+          - 44
+          - 45
+          - 46
+          - 47
+          - 48
+          - 49
+          - 50
+          - 51
+          - 52
+          - 53
+          - 54
+          - 55
+          - 56
+          - 57
+          - 58
+          - 59
+          - 60
+          - 61
+          - 62
+          - 63
+          - 64
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+          sparse-checkout: |
+            /.cpplint
+            /Makefile
+            /benchmark/
+            /deps/ncrypto/
+            /doc/
+            /lib/
+            /src/
+            /test/
+            /tools/
+          sparse-checkout-cone-mode: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
+      - name: Lint C/C++ files
+        run: make lint-cpp
+
+  summarize:
+    if: ${{ always() && github.repository == 'inoway46/node' }}
+    needs: [full, sparse]
+    runs-on: ubuntu-slim
+    permissions:
+      actions: read
+    steps:
+      - name: Collect all job results
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100" \
+            > jobs.json
+      - name: Summarize timings
+        run: |
+          python3 - <<'PY'
+          import collections
+          import datetime
+          import json
+          import math
+          import os
+          import statistics
+
+          with open('jobs.json') as source:
+              jobs = [job for page in json.load(source) for job in page['jobs']]
+
+          def seconds(item):
+              if not item.get('started_at') or not item.get('completed_at'):
+                  return None
+              return (datetime.datetime.fromisoformat(item['completed_at'].replace('Z', '+00:00')) -
+                      datetime.datetime.fromisoformat(item['started_at'].replace('Z', '+00:00'))).total_seconds()
+
+          def stats(values):
+              values = sorted(value for value in values if value is not None)
+              if not values:
+                  return None
+              return dict(n=len(values), mean=statistics.mean(values), median=statistics.median(values),
+                          p90=values[math.ceil(len(values) * .90) - 1],
+                          p99=values[math.ceil(len(values) * .99) - 1], min=values[0], max=values[-1])
+
+          result = dict(source_sha=os.environ['SOURCE_SHA'], variants={})
+          lines = ['# Lint C++ checkout comparison', '', f"Source: `{result['source_sha']}`", '',
+                   'Runner: `ubuntu-slim`; Python: `3.14`; 64 independent jobs per variant; max-parallel: 5 each.', '',
+                   'Timings below are seconds for successful jobs only. Job duration excludes queue time.', '',
+                   '| Variant | Success | Conclusions |', '|---|---:|---|']
+          for variant in ['full', 'sparse']:
+              selected = [job for job in jobs if job['name'].startswith(f'lint-cpp / {variant} / ')]
+              assert len(selected) == 64, (variant, len(selected))
+              assert all(job['status'] == 'completed' for job in selected), variant
+              good = [job for job in selected if job['conclusion'] == 'success']
+              counts = dict(collections.Counter(job['conclusion'] for job in selected))
+              timings = {'Job total': stats([seconds(job) for job in good])}
+              for step_name in ['Checkout source', 'Set up Python', 'Lint C/C++ files']:
+                  timings[step_name] = stats([seconds(step) for job in good for step in job['steps']
+                                             if step['name'] == step_name and step['conclusion'] == 'success'])
+              result['variants'][variant] = dict(conclusions=counts, timings=timings)
+              lines.append(f'| {variant} | {len(good)}/64 | {json.dumps(counts)} |')
+          lines += ['', '| Variant | Phase | N | Mean | Median | P90 | P99 | Min | Max |',
+                    '|---|---|---:|---:|---:|---:|---:|---:|---:|']
+          for variant, data in result['variants'].items():
+              for phase, timing in data['timings'].items():
+                  if timing is not None:
+                      values = ' | '.join(f'{timing[key]:.2f}' for key in ['mean', 'median', 'p90', 'p99', 'min', 'max'])
+                      lines.append(f"| {variant} | {phase} | {timing['n']} | {values} |")
+          with open('comparison.json', 'w') as destination:
+              json.dump(result, destination, indent=2)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as destination:
+              destination.write('\n'.join(lines) + '\n')
+          print(json.dumps(result, indent=2))
+          PY
+      - name: Preserve raw results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lint-cpp-checkout-results
+          path: |
+            jobs.json
+            comparison.json
+          retention-days: 30
