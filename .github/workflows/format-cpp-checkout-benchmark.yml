@@ -50,9 +50,9 @@ jobs:
           fi
           test "$(git rev-parse HEAD)" = "$MERGE_SHA"
           test "$base" = "$BASE_SHA"
-          git diff --binary "$base" HEAD > "$RUNNER_TEMP/input.patch"
+          git diff --binary --full-index "$base" HEAD > "$RUNNER_TEMP/input.patch"
           CLANG_FORMAT_START="$base" make format-cpp || true
-          git diff --binary > "$RUNNER_TEMP/format.patch"
+          git diff --binary --full-index > "$RUNNER_TEMP/format.patch"
           status=0
           git diff --exit-code || status=$?
           jq -n --arg variant "$VARIANT" --argjson trial "$TRIAL" \
