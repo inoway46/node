@@ -1,4 +1,4 @@
-name: Format C++ checkout benchmark
+name: Format C++ checkout benchmark (128 each)
 
 on:
   push:
@@ -7,27 +7,46 @@ on:
 permissions:
   contents: read
 
+env:
+  MERGE_SHA: 341340e62c3ebe48f37fb96def8960d8d3a6bfd9
+
 jobs:
-  benchmark:
+  full:
     if: github.repository == 'inoway46/node'
+    name: format-cpp / full / ${{ matrix.trial }}
     runs-on: ubuntu-slim
     strategy:
       fail-fast: false
-      max-parallel: 32
+      max-parallel: 5
       matrix:
-        trial: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128]
-        variant: [full, shallow]
+        trial: [1, 2, 3, 4, 5, 6, 7, 8,
+                9, 10, 11, 12, 13, 14, 15, 16,
+                17, 18, 19, 20, 21, 22, 23, 24,
+                25, 26, 27, 28, 29, 30, 31, 32,
+                33, 34, 35, 36, 37, 38, 39, 40,
+                41, 42, 43, 44, 45, 46, 47, 48,
+                49, 50, 51, 52, 53, 54, 55, 56,
+                57, 58, 59, 60, 61, 62, 63, 64,
+                65, 66, 67, 68, 69, 70, 71, 72,
+                73, 74, 75, 76, 77, 78, 79, 80,
+                81, 82, 83, 84, 85, 86, 87, 88,
+                89, 90, 91, 92, 93, 94, 95, 96,
+                97, 98, 99, 100, 101, 102, 103, 104,
+                105, 106, 107, 108, 109, 110, 111, 112,
+                113, 114, 115, 116, 117, 118, 119, 120,
+                121, 122, 123, 124, 125, 126, 127, 128]
     env:
-      VARIANT: ${{ matrix.variant }}
+      VARIANT: full
       TRIAL: ${{ matrix.trial }}
       MERGE_SHA: 341340e62c3ebe48f37fb96def8960d8d3a6bfd9
       BASE_SHA: d880e7474c058dd5c9ca2d1e2b0df15f9d5b779e
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: nodejs/node
           ref: ${{ env.MERGE_SHA }}
-          fetch-depth: ${{ matrix.variant == 'full' && '0' || '2' }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Use Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
@@ -68,19 +87,177 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: result-${{ matrix.variant }}-${{ matrix.trial }}
+          name: result-full-${{ matrix.trial }}
           path: ${{ runner.temp }}/result-*.json
           retention-days: 30
-  compare:
-    if: always()
-    needs: benchmark
+
+  shallow:
+    if: github.repository == 'inoway46/node'
+    name: format-cpp / shallow / ${{ matrix.trial }}
     runs-on: ubuntu-slim
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        trial: [1, 2, 3, 4, 5, 6, 7, 8,
+                9, 10, 11, 12, 13, 14, 15, 16,
+                17, 18, 19, 20, 21, 22, 23, 24,
+                25, 26, 27, 28, 29, 30, 31, 32,
+                33, 34, 35, 36, 37, 38, 39, 40,
+                41, 42, 43, 44, 45, 46, 47, 48,
+                49, 50, 51, 52, 53, 54, 55, 56,
+                57, 58, 59, 60, 61, 62, 63, 64,
+                65, 66, 67, 68, 69, 70, 71, 72,
+                73, 74, 75, 76, 77, 78, 79, 80,
+                81, 82, 83, 84, 85, 86, 87, 88,
+                89, 90, 91, 92, 93, 94, 95, 96,
+                97, 98, 99, 100, 101, 102, 103, 104,
+                105, 106, 107, 108, 109, 110, 111, 112,
+                113, 114, 115, 116, 117, 118, 119, 120,
+                121, 122, 123, 124, 125, 126, 127, 128]
+    env:
+      VARIANT: shallow
+      TRIAL: ${{ matrix.trial }}
+      MERGE_SHA: 341340e62c3ebe48f37fb96def8960d8d3a6bfd9
+      BASE_SHA: d880e7474c058dd5c9ca2d1e2b0df15f9d5b779e
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: nodejs/node
+          ref: ${{ env.MERGE_SHA }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Use Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: lts/*
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.14'
+          allow-prereleases: true
+      - name: Format C/C++ files
+        run: |
+          make format-cpp-build
+          if [ "$VARIANT" = full ]; then
+            base=$(git merge-base HEAD refs/remotes/origin/main)
+            test "$(git rev-parse --is-shallow-repository)" = false
+          else
+            base=$(git rev-parse HEAD^)
+            test "$(git rev-parse --is-shallow-repository)" = true
+          fi
+          test "$(git rev-parse HEAD)" = "$MERGE_SHA"
+          test "$base" = "$BASE_SHA"
+          git diff --binary --full-index "$base" HEAD > "$RUNNER_TEMP/input.patch"
+          CLANG_FORMAT_START="$base" make format-cpp || true
+          git diff --binary --full-index > "$RUNNER_TEMP/format.patch"
+          status=0
+          git diff --exit-code || status=$?
+          jq -n --arg variant "$VARIANT" --argjson trial "$TRIAL" \
+            --arg merge "$MERGE_SHA" --arg base "$base" \
+            --arg input "$(sha256sum "$RUNNER_TEMP/input.patch" | cut -d' ' -f1)" \
+            --arg patch "$(sha256sum "$RUNNER_TEMP/format.patch" | cut -d' ' -f1)" \
+            --argjson status "$status" \
+            '{variant: $variant, trial: $trial, merge: $merge, base: $base, input: $input, patch: $patch, status: $status}' \
+            > "$RUNNER_TEMP/result-$VARIANT-$TRIAL.json"
+          cat "$RUNNER_TEMP/result-$VARIANT-$TRIAL.json"
+          exit "$status"
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: result-shallow-${{ matrix.trial }}
+          path: ${{ runner.temp }}/result-*.json
+          retention-days: 30
+
+  summarize:
+    if: ${{ always() && github.repository == 'inoway46/node' }}
+    needs: [full, shallow]
+    runs-on: ubuntu-slim
+    permissions:
+      actions: read
+    steps:
+      - name: Collect all job results
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100" \
+            > jobs.json
+      - name: Summarize timings
+        run: |
+          python3 - <<'PY'
+          import collections
+          import datetime
+          import json
+          import math
+          import os
+          import statistics
+
+          with open('jobs.json') as source:
+              jobs = [job for page in json.load(source) for job in page['jobs']]
+
+          def seconds(item):
+              if not item.get('started_at') or not item.get('completed_at'):
+                  return None
+              return (datetime.datetime.fromisoformat(item['completed_at'].replace('Z', '+00:00')) -
+                      datetime.datetime.fromisoformat(item['started_at'].replace('Z', '+00:00'))).total_seconds()
+
+          def stats(values):
+              values = sorted(value for value in values if value is not None)
+              if not values:
+                  return None
+              return dict(n=len(values), mean=statistics.mean(values), median=statistics.median(values),
+                          sd=statistics.stdev(values) if len(values) > 1 else 0,
+                          p90=values[math.ceil(len(values) * .90) - 1],
+                          p99=values[math.ceil(len(values) * .99) - 1], min=values[0], max=values[-1])
+
+          result = dict(source_sha=os.environ['MERGE_SHA'], variants={})
+          lines = ['# Format C++ checkout comparison', '', f"Source: `{result['source_sha']}`", '',
+                   'Runner: `ubuntu-slim`; Python: `3.14`; 128 independent jobs per variant; max-parallel: 5 each.', '',
+                   'Timings below are seconds for successful jobs only. Job duration excludes queue time.', '',
+                   '| Variant | Success | Conclusions |', '|---|---:|---|']
+          for variant in ['full', 'shallow']:
+              selected = [job for job in jobs if job['name'].startswith(f'format-cpp / {variant} / ')]
+              assert len(selected) == 128, (variant, len(selected))
+              assert all(job['status'] == 'completed' for job in selected), variant
+              good = [job for job in selected if job['conclusion'] == 'success']
+              counts = dict(collections.Counter(job['conclusion'] for job in selected))
+              timings = {'Job total': stats([seconds(job) for job in good])}
+              for step_name in ['Checkout source', 'Use Node.js', 'Set up Python', 'Format C/C++ files']:
+                  timings[step_name] = stats([seconds(step) for job in good for step in job['steps']
+                                             if step['name'] == step_name and step['conclusion'] == 'success'])
+              result['variants'][variant] = dict(conclusions=counts, timings=timings)
+              lines.append(f'| {variant} | {len(good)}/128 | {json.dumps(counts)} |')
+          lines += ['', '| Variant | Phase | N | Mean | Median | P90 | P99 | Min | Max |',
+                    '|---|---|---:|---:|---:|---:|---:|---:|---:|']
+          for variant, data in result['variants'].items():
+              for phase, timing in data['timings'].items():
+                  if timing is not None:
+                      values = ' | '.join(f'{timing[key]:.2f}' for key in ['mean', 'median', 'p90', 'p99', 'min', 'max'])
+                      lines.append(f"| {variant} | {phase} | {timing['n']} | {values} |")
+          with open('comparison.json', 'w') as destination:
+              json.dump(result, destination, indent=2)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as destination:
+              destination.write('\n'.join(lines) + '\n')
+          print(json.dumps(result, indent=2))
+          PY
+      - name: Download trial results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           pattern: result-*
+          path: results
           merge-multiple: true
-      - name: Compare all results
+      - name: Compare formatting results
         run: |
-          jq -s -e 'length == 256 and all(.[]; .status == 0) and (map({merge, base, input, patch, status}) | unique | length == 1)' result-*.json
-          jq -s . result-*.json
+          jq -s -e 'length == 256 and all(.[]; .status == 0) and (map({merge, base, input, patch, status}) | unique | length == 1)' results/result-*.json
+      - name: Preserve raw results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: format-cpp-checkout-128-results
+          path: |
+            jobs.json
+            comparison.json
+          retention-days: 30
