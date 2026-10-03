@@ -1,0 +1,77 @@
+name: Issue 66457 V8 fix verification
+
+on:
+  push:
+    branches: [codex/repro-66457-arm64]
+    paths:
+      - .github/workflows/repro-66457-v8-fix.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.repository == 'inoway46/node'
+    runs-on: macos-15
+    timeout-minutes: 180
+    env:
+      EXPECT_ARCH: arm64
+      TRACE_RUNS: '10000'
+      INSPECT_HEAP: '1'
+      FIX_SOURCE_SHA: 15ad628612b07aff78e25a07100dfcd88d6f7fae
+    steps:
+      - name: Check out reproducer and diagnostics
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check out Node.js with the V8 fix
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: targos/node
+          ref: 15ad628612b07aff78e25a07100dfcd88d6f7fae
+          path: fixed-node
+          persist-credentials: false
+      - name: Verify fix source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          test "$(git -C fixed-node rev-parse HEAD)" = "$FIX_SOURCE_SHA"
+          grep -qF 'CreateUnduplicatableId()' fixed-node/deps/v8/src/maglev/maglev-code-generator.cc
+          test -f fixed-node/deps/v8/test/mjsunit/maglev/regress-547819997.js
+          mkdir -p results
+          git -C fixed-node rev-parse HEAD > results/fix-source-sha.txt
+          cat fixed-node/deps/v8/include/v8-version.h > results/v8-version.h
+      - name: Select Xcode 16.4
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
+      - name: Build fixed Node.js
+        working-directory: fixed-node
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure
+          make -j"$(sysctl -n hw.logicalcpu)"
+      - name: Record built version
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_binary="$GITHUB_WORKSPACE/fixed-node/out/Release/node"
+          test -x "$node_binary"
+          node_version="$("$node_binary" -p 'process.version.slice(1)')"
+          test "$("$node_binary" -p 'process.arch')" = arm64
+          test "$("$node_binary" -p 'process.versions.v8.startsWith("15.2.")')" = true
+          echo "NODE_BINARY=$node_binary" >> "$GITHUB_ENV"
+          echo "NODE_VERSION=$node_version" >> "$GITHUB_ENV"
+          "$node_binary" -p 'JSON.stringify({version:process.version,v8:process.versions.v8,arch:process.arch})' > results/built-version.json
+      - name: Run reproducer with trace and HeapNumber inspection
+        run: python3 .github/diagnostics/issue-66457/trace-runner.py
+      - name: Upload raw logs and summaries
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: issue-66457-v8-fix-macos-arm64
+          path: results/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 9
