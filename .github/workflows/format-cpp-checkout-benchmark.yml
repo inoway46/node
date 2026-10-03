@@ -1,0 +1,83 @@
+name: Format C++ checkout benchmark
+
+on:
+  push:
+    branches: [format-cpp-checkout-benchmark]
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    if: github.repository == 'inoway46/node'
+    runs-on: ubuntu-slim
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        trial: [1, 2, 3, 4]
+        variant: [full, shallow]
+    env:
+      VARIANT: ${{ matrix.variant }}
+      TRIAL: ${{ matrix.trial }}
+      MERGE_SHA: 341340e62c3ebe48f37fb96def8960d8d3a6bfd9
+      BASE_SHA: d880e7474c058dd5c9ca2d1e2b0df15f9d5b779e
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: nodejs/node
+          ref: ${{ env.MERGE_SHA }}
+          fetch-depth: ${{ matrix.variant == 'full' && '0' || '2' }}
+          persist-credentials: false
+      - name: Use Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: lts/*
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.14'
+          allow-prereleases: true
+      - name: Format C/C++ files
+        run: |
+          make format-cpp-build
+          if [ "$VARIANT" = full ]; then
+            base=$(git merge-base HEAD refs/remotes/origin/main)
+            test "$(git rev-parse --is-shallow-repository)" = false
+          else
+            base=$(git rev-parse HEAD^)
+            test "$(git rev-parse --is-shallow-repository)" = true
+          fi
+          test "$(git rev-parse HEAD)" = "$MERGE_SHA"
+          test "$base" = "$BASE_SHA"
+          git diff --binary "$base" HEAD > "$RUNNER_TEMP/input.patch"
+          CLANG_FORMAT_START="$base" make format-cpp || true
+          git diff --binary > "$RUNNER_TEMP/format.patch"
+          status=0
+          git diff --exit-code || status=$?
+          jq -n --arg variant "$VARIANT" --argjson trial "$TRIAL" \
+            --arg merge "$MERGE_SHA" --arg base "$base" \
+            --arg input "$(sha256sum "$RUNNER_TEMP/input.patch" | cut -d' ' -f1)" \
+            --arg patch "$(sha256sum "$RUNNER_TEMP/format.patch" | cut -d' ' -f1)" \
+            --argjson status "$status" \
+            '{variant: $variant, trial: $trial, merge: $merge, base: $base, input: $input, patch: $patch, status: $status}' \
+            > "$RUNNER_TEMP/result-$VARIANT-$TRIAL.json"
+          cat "$RUNNER_TEMP/result-$VARIANT-$TRIAL.json"
+      - name: Upload result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: result-${{ matrix.variant }}-${{ matrix.trial }}
+          path: ${{ runner.temp }}/result-*.json
+          retention-days: 7
+  compare:
+    needs: benchmark
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: result-*
+          merge-multiple: true
+      - name: Compare all results
+        run: |
+          jq -s -e 'length == 8 and (map({merge, base, input, patch, status}) | unique | length == 1)' result-*.json
+          jq -s . result-*.json
