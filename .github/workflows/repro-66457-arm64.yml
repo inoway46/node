@@ -1,4 +1,4 @@
-name: Issue 66457 arm64 trace
+name: Issue 66457 arm64 HeapNumber inspection
 
 on:
   push:
@@ -20,11 +20,12 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        node: [26.10.0, 24.11.0]
+        node: [26.10.0]
     env:
       NODE_VERSION: ${{ matrix.node }}
       EXPECT_ARCH: arm64
-      TRACE_RUNS: '3000'
+      TRACE_RUNS: '10000'
+      INSPECT_HEAP: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -44,13 +45,13 @@ jobs:
           (cd "$RUNNER_TEMP" && shasum -a 256 -c "$GITHUB_WORKSPACE/results/archive.sha256")
           tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" "node-v${NODE_VERSION}-darwin-arm64/bin/node"
           echo "NODE_BINARY=$RUNNER_TEMP/node-v${NODE_VERSION}-darwin-arm64/bin/node" >> "$GITHUB_ENV"
-      - name: Run 3000 unchanged reproducer traces
+      - name: Inspect retained objects after the original reproducer verdict
         run: python3 .github/diagnostics/issue-66457/trace-runner.py
       - name: Upload raw logs and summaries
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: issue-66457-trace-macos-arm64-node-${{ matrix.node }}
+          name: issue-66457-heap-macos-arm64-node-${{ matrix.node }}
           path: results/
           if-no-files-found: error
           retention-days: 14

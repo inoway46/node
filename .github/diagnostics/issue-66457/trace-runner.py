@@ -8,6 +8,8 @@ import re
 import subprocess
 import time
 
+from heap_analysis import inspect_heap
+
 
 ROOT = Path.cwd()
 OUTPUT = ROOT / 'results'
@@ -20,6 +22,19 @@ CODE = SOURCE.read_bytes()
 EXPECTED_SHA256 = '94ce50a5eb81b4f121eb67937f5a81da19f551c36f9b7561b2fa7d89f7cbfd84'
 assert hashlib.sha256(CODE).hexdigest() == EXPECTED_SHA256
 REPRODUCER = OUTPUT / 'maglev-osr-alias.mjs'
+heap_inspection = os.environ.get('INSPECT_HEAP') == '1'
+flags = ['--trace-opt', '--trace-deopt']
+if heap_inspection:
+    # Only append diagnostics after all original calls and the original verdict.
+    # Do not read r.area separately: that can box a new number instead of showing
+    # the actual field storage. Dump each object directly, twice, without JS
+    # logging or new allocations between the two passes.
+    exit_line = b'process.exit(bad ? 1 : 0);\n'
+    assert CODE.endswith(exit_line)
+    dumps = ''.join(f'%DebugPrint(out[{index}].r);\n'
+                    for _ in range(2) for index in range(8)).encode()
+    CODE = CODE[:-len(exit_line)] + dumps + exit_line
+    flags.append('--allow-natives-syntax')
 REPRODUCER.write_bytes(CODE)
 
 metadata = json.loads(subprocess.check_output([
@@ -30,6 +45,8 @@ assert metadata['arch'] == os.environ.get('EXPECT_ARCH', 'arm64'), metadata
 assert metadata['version'] == 'v' + os.environ['NODE_VERSION'], metadata
 metadata.update(os=platform.platform(), parallelism=8,
                 reproducer_sha256=EXPECTED_SHA256,
+                executed_sha256=hashlib.sha256(CODE).hexdigest(),
+                heap_inspection=heap_inspection,
                 run_id=os.environ.get('GITHUB_RUN_ID'),
                 commit=os.environ.get('GITHUB_SHA'))
 if platform.system() == 'Darwin':
@@ -41,7 +58,7 @@ if platform.system() == 'Darwin':
 count = int(os.environ.get('TRACE_RUNS', '3000'))
 directory = OUTPUT / 'trace'
 directory.mkdir(exist_ok=True)
-command = [NODE, '--trace-opt', '--trace-deopt', str(REPRODUCER)]
+command = [NODE, *flags, str(REPRODUCER)]
 (directory / 'command.json').write_text(json.dumps(command) + '\n')
 
 
@@ -64,25 +81,40 @@ def run(index):
         returncode = 'timeout'
     (directory / f'{index:04d}.stdout').write_bytes(stdout)
     (directory / f'{index:04d}.stderr').write_bytes(stderr)
-    bug, ok, error = verdict(returncode, stdout.decode(errors='replace'))
+    output = stdout.decode(errors='replace')
+    bug, ok, error = verdict(returncode, output)
+    heap = None
+    if heap_inspection:
+        try:
+            heap = inspect_heap(output)
+        except ValueError as exception:
+            heap = {'error': str(exception)}
     return {'run': index, 'returncode': returncode, 'bug': bug, 'ok': ok,
-            'error': error, 'seconds': round(time.monotonic() - started, 3)}
+            'error': error, 'seconds': round(time.monotonic() - started, 3),
+            'heap': heap}
 
 
 rows = []
 with (directory / 'runs.jsonl').open('w') as record:
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        for row in pool.map(run, range(1, count + 1)):
-            rows.append(row)
-            record.write(json.dumps(row) + '\n')
-            record.flush()
-            if len(rows) % 100 == 0:
-                print(len(rows), 'bugs', sum(r['bug'] for r in rows),
-                      'errors', sum(r['error'] for r in rows), flush=True)
+        for start in range(1, count + 1, 100):
+            for row in pool.map(run, range(start, min(start + 100, count + 1))):
+                rows.append(row)
+                record.write(json.dumps(row) + '\n')
+                record.flush()
+            print(len(rows), 'bugs', sum(r['bug'] for r in rows),
+                  'errors', sum(r['error'] for r in rows), flush=True)
+            if heap_inspection and any(
+                    r['bug'] and r['heap'].get('shared_changed_calls')
+                    for r in rows):
+                break
+            if heap_inspection and any('error' in r['heap'] for r in rows):
+                break
 
 with (OUTPUT / 'faceStats-bytecode.log').open('wb') as log:
     bytecode_result = subprocess.run([
-        NODE, '--print-bytecode', '--print-bytecode-filter=faceStats',
+        NODE, *(['--allow-natives-syntax'] if heap_inspection else []),
+        '--print-bytecode', '--print-bytecode-filter=faceStats',
         str(REPRODUCER)], env=ENV, stdout=log, stderr=subprocess.STDOUT,
         timeout=120)
 bytecode = (OUTPUT / 'faceStats-bytecode.log').read_text(errors='replace')
@@ -132,11 +164,20 @@ for row in rows:
 (OUTPUT / 'trace-analysis.json').write_text(json.dumps(analyses, indent=2) + '\n')
 summary = {
     'environment': metadata,
-    'runs': count,
+    'runs': len(rows),
+    'max_runs': count,
     'bugs': sum(row['bug'] for row in rows),
     'errors': sum(row['error'] for row in rows),
     'bug_runs': [row['run'] for row in rows if row['bug']],
     'error_runs': [row['run'] for row in rows if row['error']],
+    'heap_error_runs': [row['run'] for row in rows
+                        if row['heap'] and 'error' in row['heap']],
+    'confirmed_shared_bug_runs': [
+        row['run'] for row in rows if row['bug'] and row['heap'] and
+        row['heap'].get('shared_changed_calls')],
+    'shared_without_bug_runs': [
+        row['run'] for row in rows if not row['bug'] and row['heap'] and
+        row['heap'].get('shared_heap_numbers')],
     'bytecode_returncode': bytecode_result.returncode,
     'literal_offset': literal_offset,
     'first_area_store_offset': store_offset,
@@ -160,11 +201,12 @@ print(json.dumps(summary, indent=2), flush=True)
 if 'GITHUB_STEP_SUMMARY' in os.environ:
     with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as report:
         report.write(f"Node {metadata['version']} / V8 {metadata['v8']} / "
-                     f"{metadata['os']} / {len(metadata['cpus'])} logical CPUs\n\n")
-        report.write(f"Trace: {count} runs, {summary['bugs']} BUG, "
+                     f"{metadata['os']} / {metadata['cpus']} logical CPUs\n\n")
+        report.write(f"Trace: {len(rows)} runs, {summary['bugs']} BUG, "
                      f"{summary['errors']} execution errors. "
                      f"Maglev deopt at area store: "
                      f"{summary['maglev_store_deopt_runs']} runs, "
                      f"with BUG: {summary['bug_and_maglev_store_deopt_runs']}.\n")
-if summary['errors'] or bytecode_result.returncode or store_offset is None:
+if (summary['errors'] or summary['heap_error_runs'] or
+        bytecode_result.returncode or store_offset is None):
     raise SystemExit('Trace verification was incomplete')
