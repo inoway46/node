@@ -1,0 +1,106 @@
+// Node 24 (V8 13.6): objects returned by a function come out sharing the storage of
+// their double-valued fields, so results of earlier calls change after later calls.
+//
+// Intermittent: about 1 run in 50 on Node 24.11.0 and 1 in 175 on Node 26.9.0 (macOS arm64).
+// Run it in a loop:
+//
+//   for i in $(seq 1 2000); do node maglev-osr-alias.mjs > /dev/null || echo FAIL; done | sort | uniq -c
+//
+// It does not fail with --no-maglev-osr.
+//
+// `faceStats` sums the area of the triangles of one face of a triangle soup and returns
+// { area, maxOff, verts, rim }. The script calls it eight times on different inputs, keeps
+// each returned object together with the numbers read from it right after the call, and
+// at the end compares each object with what it returned.
+
+class V3 {
+  constructor(x = 0, y = 0, z = 0) { this.x = x; this.y = y; this.z = z; }
+  clone() { return new V3(this.x, this.y, this.z); }
+  sub(v) { this.x -= v.x; this.y -= v.y; this.z -= v.z; return this; }
+  add(v) { this.x += v.x; this.y += v.y; this.z += v.z; return this; }
+  cross(v) { const ax = this.x, ay = this.y, az = this.z; this.x = ay * v.z - az * v.y; this.y = az * v.x - ax * v.z; this.z = ax * v.y - ay * v.x; return this; }
+  length() { return Math.sqrt(this.x * this.x + this.y * this.y + this.z * this.z); }
+  divideScalar(s) { this.x /= s; this.y /= s; this.z /= s; return this; }
+}
+function faceStats(s, face, off) {
+  const id = s.ids.get(face.id);
+  const P = (i) => new V3(s.pos[3 * i], s.pos[3 * i + 1], s.pos[3 * i + 2]);
+  let area2 = 0, maxOff = 0;
+  const verts = new Set();
+  const use = new Map();
+  for (let t = 0; t < s.tris.length / 3; t++) {
+    if (s.faceOf[t] !== id) continue;
+    const idx = [s.tris[3 * t], s.tris[3 * t + 1], s.tris[3 * t + 2]];
+    const [a, b, c] = idx.map(P);
+    area2 += b.clone().sub(a).cross(c.clone().sub(a)).length() / 2;
+    maxOff = Math.max(maxOff, off(a.clone().add(b).add(c).divideScalar(3)));
+    for (let e = 0; e < 3; e++) {
+      verts.add(idx[e]);
+      const k = [idx[e], idx[(e + 1) % 3]].sort((x, y) => x - y).join("|");
+      use.set(k, (use.get(k) ?? 0) + 1);
+    }
+  }
+  const rim = new Set();
+  for (const [k, c] of use) if (c === 1) for (const i of k.split("|")) rim.add(Number(i));
+  return { area: area2, maxOff, verts, rim };
+}
+
+
+// ---- generated input: triangle soups on a cylinder of radius 5, each triangle tagged with a face label ----
+let seed = 12345;
+const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+function soup(nVerts, nTris, nFaces, label, labelTris) {
+  const pos = new Float32Array(3 * nVerts);
+  for (let i = 0; i < nVerts; i++) { const th = rnd() * 2 * Math.PI; pos[3 * i] = 5 * Math.cos(th); pos[3 * i + 1] = 5 * Math.sin(th); pos[3 * i + 2] = rnd() * 8; }
+  const tris = new Uint32Array(3 * nTris), faceOf = new Uint32Array(nTris);
+  for (let t = 0; t < nTris; t++) {
+    const a = Math.floor(rnd() * (nVerts - 2));
+    tris[3 * t] = a; tris[3 * t + 1] = a + 1; tris[3 * t + 2] = a + 2;
+    let other = 1 + Math.floor(rnd() * nFaces); if (other === label) other = (other % nFaces) + 1;
+    faceOf[t] = t < labelTris ? label : other;
+  }
+  const faces = Array.from({ length: nFaces }, (_, k) => ({ id: 'face-' + k + '-' + Math.floor(rnd() * 1e9) }));
+  return { s: { pos, tris, faceOf, ids: new Map(faces.map((f, k) => [f.id, k + 1])) }, faceId: faces[label - 1].id };
+}
+// [vertices, triangles, faces, label asked for, triangles carrying that label, ms of other work before the call]
+const CALLS = [
+  [5112, 10220, 3, 1, 10082, 40],
+  [5206, 528, 4, 1, 338, 20],
+  [5206, 528, 4, 4, 52, 0],
+  [5206, 528, 4, 4, 52, 40],
+  [5206, 528, 4, 4, 52, 10],
+  [2664, 5324, 4, 2, 2592, 60],
+  [2766, 2994, 5, 2, 204, 20],
+  [2766, 2994, 5, 5, 58, 0],
+];
+// Other work between calls: allocation, some of it retained, so garbage collections run.
+const ring = []; let sink = 0, w = 0;
+function churn(ms) {
+  if (ms <= 0) return;
+  const end = performance.now() + ms;
+  while (performance.now() < end) {
+    for (let i = 0; i < 2000; i++) {
+      const o = { a: w * 0.5, b: [w, w + 1, w + 2], c: 'k' + (w % 977), d: { e: w } };
+      if (ring.length < 200000) ring.push(o); else ring[w % 200000] = o;
+      sink += o.b.length; w++;
+    }
+  }
+}
+const mkOff = (R) => (p) => Math.abs(Math.hypot(p.x, p.y) - R);
+const out = [];
+CALLS.forEach(([nv, nt, nf, label, labelTris, gap], ci) => {
+  churn(gap);
+  const { s, faceId } = soup(nv, nt, nf, label, labelTris);
+  const face = ci % 3 ? { id: faceId, kind: 'x' + ci, n: ci } : { id: faceId };   // a few object shapes, as real callers have
+  const r = faceStats(s, face, mkOff(5));                                          // a fresh closure per call
+  out.push({ r, area: r.area, maxOff: r.maxOff });                                 // remember what the call returned
+});
+let bad = 0;
+out.forEach((o, i) => {
+  if (!Object.is(o.r.area, o.area) || !Object.is(o.r.maxOff, o.maxOff)) {
+    bad++;
+    console.log(`call ${i + 1}: returned area=${o.area} maxOff=${o.maxOff}; the same object now reads area=${o.r.area} maxOff=${o.r.maxOff}`);
+  }
+});
+console.log(bad ? 'BUG: results of earlier calls changed after later calls' : 'ok');
+process.exit(bad ? 1 : 0);
