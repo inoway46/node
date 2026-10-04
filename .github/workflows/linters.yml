@@ -97,13 +97,21 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: |
-            tools/doc/package-lock.json
-            tools/eslint/package-lock.json
-            tools/lint-md/package-lock.json
-      - name: Cache ESLint results
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+          package-manager-cache: false
+      - name: Get npm cache directory
+        id: npm-cache-dir
+        run: |
+          echo "path=$(npm config get cache)" >> "$GITHUB_OUTPUT"
+          echo "arch=$(node -p 'process.arch')" >> "$GITHUB_OUTPUT"
+      - name: Restore npm cache
+        id: npm-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.npm-cache-dir.outputs.path }}
+          key: node-cache-${{ runner.os }}-${{ steps.npm-cache-dir.outputs.arch }}-npm-${{ hashFiles('tools/doc/package-lock.json', 'tools/eslint/package-lock.json', 'tools/lint-md/package-lock.json') }}
+      - name: Restore ESLint results
+        id: eslint-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         env:
           # ESLint only invalidates its cache on config changes, so the key also
           # covers the custom rules and the files they read.
@@ -148,6 +156,19 @@ jobs:
           NODE=$(command -v node) make lint-md ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
         env:
           NODE_RELEASED_VERSIONS: ${{ steps.get-released-versions.outputs.NODE_RELEASED_VERSIONS }}
+      # PRs can restore base branch caches, but only trusted pushes populate them.
+      - name: Save npm cache
+        if: github.event_name == 'push' && steps.npm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.npm-cache-dir.outputs.path }}
+          key: ${{ steps.npm-cache.outputs.cache-primary-key }}
+      - name: Save ESLint results
+        if: github.event_name == 'push' && steps.eslint-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .eslintcache
+          key: ${{ steps.eslint-cache.outputs.cache-primary-key }}
 
   lint-py:
     if: github.event.pull_request.draft == false
