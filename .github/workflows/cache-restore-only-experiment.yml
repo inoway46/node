@@ -48,6 +48,9 @@ jobs:
           persist-credentials: false
           repository: nodejs/node
           ref: 04904eb4ca488300816cc260cf794598c16a65ab
+      - name: Force npm cache miss on PR without changing dependencies
+        if: github.event_name == 'pull_request'
+        run: printf '\n' >> tools/doc/package-lock.json
       - name: Use Node.js ${{ env.NODE_VERSION }}
         id: setup-node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
@@ -125,10 +128,15 @@ jobs:
         with:
           path: .eslintcache
           key: ${{ steps.eslint-cache.outputs.cache-primary-key }}
-      - name: Verify legacy npm cache compatibility
+      - name: Verify expected npm cache result
         env:
           CACHE_HIT: ${{ steps.npm-cache.outputs.cache-hit }}
-        run: test "$CACHE_HIT" = true
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            test "$CACHE_HIT" != true
+          else
+            test "$CACHE_HIT" = true
+          fi
       - name: Verify PR restored a different commit's ESLint cache
         if: github.event_name == 'pull_request'
         env:
