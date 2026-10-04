@@ -1,0 +1,153 @@
+name: Cache restore-only experiment
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/cache-restore-only-experiment.yml]
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/cache-restore-only-experiment.yml]
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: lts/*
+
+jobs:
+  legacy-npm:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          repository: nodejs/node
+          ref: 04904eb4ca488300816cc260cf794598c16a65ab
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            tools/doc/package-lock.json
+            tools/eslint/package-lock.json
+            tools/lint-md/package-lock.json
+      - name: Populate npm cache using existing setup-node behavior
+        run: |
+          for directory in tools/doc tools/eslint tools/lint-md; do
+            (cd "$directory" && node ../../deps/npm/bin/npm-cli.js ci --omit=dev)
+          done
+  lint-js-and-md:
+    needs: legacy-npm
+    if: ${{ !cancelled() && (needs.legacy-npm.result == 'success' || github.event_name == 'pull_request') }}
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          repository: nodejs/node
+          ref: 04904eb4ca488300816cc260cf794598c16a65ab
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        id: setup-node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Get npm cache directory
+        id: npm-cache-dir
+        run: |
+          echo "path=$(npm config get cache)" >> "$GITHUB_OUTPUT"
+          echo "arch=$(node -p 'process.arch')" >> "$GITHUB_OUTPUT"
+      - name: Restore npm cache
+        id: npm-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.npm-cache-dir.outputs.path }}
+          key: node-cache-${{ runner.os }}-${{ steps.npm-cache-dir.outputs.arch }}-npm-${{ hashFiles('tools/doc/package-lock.json', 'tools/eslint/package-lock.json', 'tools/lint-md/package-lock.json') }}
+      - name: Restore ESLint results
+        id: eslint-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        env:
+          # ESLint only invalidates its cache on config changes, so the key also
+          # covers the custom rules and the files they read.
+          cache-prefix: eslint-${{ runner.os }}-${{ steps.setup-node.outputs.node-version }}-${{ hashFiles('eslint.config.mjs', '*/eslint.config_partial.mjs', 'tools/eslint/*', 'tools/eslint-rules/**', 'doc/api/errors.md', 'doc/api/deprecations.md') }}
+        with:
+          path: .eslintcache
+          key: ${{ env.cache-prefix }}-${{ github.sha }}
+          restore-keys: ${{ env.cache-prefix }}-
+      - name: Lint JavaScript files
+        run: |
+          set +e
+          NODE=$(command -v node) make lint-js ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+          EXIT_CODE="$?"
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo
+            echo 'ERROR: The JavaScript lint validation failed (the errors are logged above).'
+            echo '       Please fix the lint errors.'
+            if NODE=$(command -v node) make lint-js-fix > /dev/null 2>&1; then
+              echo '       Run:'
+              echo '          make lint-js-fix'
+              echo '       to fix the lint issues.'
+              git --no-pager diff
+            elif git diff --quiet --exit-code; then
+              echo '       None of the issue is auto-fixable, so manual fixes for'
+              echo '       all of the issues are required.'
+            else
+              echo '       Run:'
+              echo '          make lint-js-fix'
+              echo '       to fix the auto-fixable lint issues.'
+              echo '       Note that some manual fixes are also required.'
+            fi
+            echo
+            exit "$EXIT_CODE"
+          fi
+      - name: Get release version numbers
+        if: ${{ github.event.pull_request && github.event.pull_request.base.ref == github.event.pull_request.base.repo.default_branch }}
+        id: get-released-versions
+        run: ./tools/lint-md/list-released-versions-from-changelogs.mjs >> $GITHUB_OUTPUT
+      - name: Lint markdown files
+        run: |
+          echo "::add-matcher::.github/workflows/remark-lint-problem-matcher.json"
+          NODE=$(command -v node) make lint-md ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+        env:
+          NODE_RELEASED_VERSIONS: ${{ steps.get-released-versions.outputs.NODE_RELEASED_VERSIONS }}
+      # PRs can restore base branch caches, but only trusted pushes populate them.
+      - name: Save npm cache
+        if: github.event_name == 'push' && steps.npm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.npm-cache-dir.outputs.path }}
+          key: ${{ steps.npm-cache.outputs.cache-primary-key }}
+      - name: Save ESLint results
+        if: github.event_name == 'push' && steps.eslint-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .eslintcache
+          key: ${{ steps.eslint-cache.outputs.cache-primary-key }}
+      - name: Verify legacy npm cache compatibility
+        env:
+          CACHE_HIT: ${{ steps.npm-cache.outputs.cache-hit }}
+        run: test "$CACHE_HIT" = true
+      - name: Verify PR restored a different commit's ESLint cache
+        if: github.event_name == 'pull_request'
+        env:
+          MATCHED_KEY: ${{ steps.eslint-cache.outputs.cache-matched-key }}
+          EXACT_HIT: ${{ steps.eslint-cache.outputs.cache-hit }}
+        run: |
+          test -n "$MATCHED_KEY"
+          test "$EXACT_HIT" = false
+          printf 'Restored ESLint key: %s\n' "$MATCHED_KEY"
+      - name: Exercise a cache miss
+        id: miss
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: cache-miss-probe
+          key: cache-miss-probe-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Verify cache miss is non-fatal
+        env:
+          MATCHED_KEY: ${{ steps.miss.outputs.cache-matched-key }}
+          RESTORE_OUTCOME: ${{ steps.miss.outcome }}
+        run: |
+          test -z "$MATCHED_KEY"
+          test "$RESTORE_OUTCOME" = success
+          test ! -e cache-miss-probe
