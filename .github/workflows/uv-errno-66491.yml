@@ -1,0 +1,222 @@
+name: Investigate shared libuv errno (66491)
+
+on:
+  push:
+    branches: [investigate-uv-errno-66491]
+    paths: [.github/workflows/uv-errno-66491.yml]
+  workflow_dispatch:
+    inputs:
+      nightly_version:
+        description: Exact nightly version; empty selects the latest main nightly with source and linux-x64
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.repository != 'nodejs/node'
+    runs-on: ubuntu-24.04
+    container: debian:forky
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [v24.21.0, nightly, debian-shared]
+    env:
+      TARGET: ${{ matrix.target }}
+      NIGHTLY_VERSION: ${{ inputs.nightly_version }}
+    steps:
+      - name: Install probes and packaged libraries (no build)
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates gcc libc6-dev libuv1-dev linux-libc-dev python3
+          if [ "$TARGET" = debian-shared ]; then
+            apt-get install -y --no-install-recommends nodejs
+          fi
+
+      - name: Probe binaries, headers and shared libuv
+        shell: bash
+        run: |
+          mkdir -p results
+          python3 - <<'PY' 2>&1 | tee results/run.log
+          import ctypes
+          import ctypes.util
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+          import subprocess
+          import tarfile
+          import urllib.request
+
+          results = Path('results').resolve()
+          work = Path('/tmp/uv-errno-probe')
+          work.mkdir()
+          target = os.environ['TARGET']
+          manifest = {'target': target, 'downloads': []}
+
+          def fetch(url, destination):
+              with urllib.request.urlopen(url, timeout=120) as response:
+                  with destination.open('wb') as output:
+                      shutil.copyfileobj(response, output)
+
+          def verified_download(base, filename, checksums):
+              destination = work / filename
+              fetch(f'{base}/{filename}', destination)
+              with destination.open('rb') as downloaded:
+                  digest = hashlib.file_digest(downloaded, 'sha256').hexdigest()
+              if digest != checksums[filename]:
+                  raise RuntimeError(f'Checksum mismatch: {filename}')
+              manifest['downloads'].append({'url': f'{base}/{filename}', 'sha256': digest})
+              return destination
+
+          def command_log(name, args, **kwargs):
+              completed = subprocess.run(args, text=True, capture_output=True, **kwargs)
+              (results / name).write_text(completed.stdout + completed.stderr)
+              print(f'{name}: exit={completed.returncode}')
+              if completed.returncode:
+                  print(completed.stdout + completed.stderr)
+              return completed
+
+          if target == 'debian-shared':
+              node = Path(shutil.which('node'))
+              version = subprocess.check_output([node, '--version'], text=True).strip()
+              base = f'https://nodejs.org/dist/{version}'
+          elif target == 'nightly':
+              version = os.environ['NIGHTLY_VERSION'].strip()
+              if not version:
+                  with urllib.request.urlopen('https://nodejs.org/download/nightly/index.json', timeout=120) as response:
+                      releases = json.load(response)
+                  candidates = [r for r in releases if {'linux-x64', 'src'} <= set(r['files'])]
+                  version = max(candidates, key=lambda r: (int(r['version'].split('.')[0][1:]), r['date']))['version']
+              if not re.fullmatch(r'v\d+\.\d+\.\d+-nightly\d{8}[0-9a-f]+', version):
+                  raise ValueError('Invalid nightly version')
+              base = f'https://nodejs.org/download/nightly/{version}'
+          else:
+              version = 'v24.21.0'
+              base = f'https://nodejs.org/dist/{version}'
+
+          manifest['version'] = version
+          fetch(f'{base}/SHASUMS256.txt', results / 'SHASUMS256.txt')
+          checksums = dict((line.split()[1], line.split()[0]) for line in
+                           (results / 'SHASUMS256.txt').read_text().splitlines() if line.strip())
+          if target != 'debian-shared':
+              binary = verified_download(base, f'node-{version}-linux-x64.tar.xz', checksums)
+              with tarfile.open(binary) as archive:
+                  archive.extractall(work, filter='data')
+              node = work / f'node-{version}-linux-x64/bin/node'
+
+          # Use tests from the exact binary release, including the nightly source tarball.
+          source = verified_download(base, f'node-{version}.tar.gz', checksums)
+          source_root = work / f'node-{version}'
+          paths = ['test/parallel/test-uv-errmap.js', 'test/parallel/test-uv-errno.js',
+                   'src/uv.cc', 'deps/uv/include/uv/errno.h', 'deps/uv/src/uv-common.c']
+          with tarfile.open(source) as archive:
+              members = [m for m in archive.getmembers() if
+                         m.name.startswith(f'node-{version}/test/common/') or
+                         m.name in [f'node-{version}/{p}' for p in paths]]
+              archive.extractall(work, members=members, filter='data')
+
+          for relative in paths[2:]:
+              destination = results / 'source' / relative
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(source_root / relative, destination)
+          with node.open('rb') as executable:
+              manifest['node_binary_sha256'] = hashlib.file_digest(executable, 'sha256').hexdigest()
+
+          command_log('packages.txt', ['dpkg-query', '-W', '-f=${Package}\t${Version}\t${Architecture}\n'])
+          command_log('os.txt', ['cat', '/etc/os-release'])
+          command_log('kernel.txt', ['uname', '-a'])
+          command_log('ldd.txt', ['ldd', str(node)])
+
+          # Read compile-time header values with the preprocessor; no C compilation.
+          header_probe = '#include <uv.h>\nPROBE_EFTYPE EFTYPE\nPROBE_UV_EFTYPE UV__EFTYPE\n'
+          headers = command_log('headers.txt', ['cc', '-E', '-P', '-x', 'c', '-'], input=header_probe)
+          if headers.returncode:
+              raise RuntimeError('Header preprocessing failed')
+          manifest['headers'] = [line for line in headers.stdout.splitlines() if line.startswith('PROBE_')]
+
+          library_name = ctypes.util.find_library('uv')
+          if not library_name:
+              raise RuntimeError('Shared libuv not found')
+          library = ctypes.CDLL(library_name)
+          library.uv_version_string.restype = ctypes.c_char_p
+          shared = {'library': library_name, 'version': library.uv_version_string().decode(), 'errors': {}}
+          for function_name in ['uv_err_name_r', 'uv_strerror_r']:
+              function = getattr(library, function_name)
+              function.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t]
+              function.restype = ctypes.c_void_p
+              for value in [-134, -4028, -22]:
+                  buffer = ctypes.create_string_buffer(128)
+                  function(value, buffer, len(buffer))
+                  shared['errors'].setdefault(str(value), {})[function_name] = buffer.value.decode()
+          manifest['system_libuv'] = shared
+          eftype_definition = next(line for line in manifest['headers'] if line.startswith('PROBE_EFTYPE '))
+          native_match = re.fullmatch(r'PROBE_EFTYPE\s+\(?\s*(\d+)\s*\)?', eftype_definition)
+          native_eftype = int(native_match[1]) if native_match else None
+          header_uv_eftype = -native_eftype if native_eftype is not None else -4028
+          buffer = ctypes.create_string_buffer(128)
+          library.uv_err_name_r(header_uv_eftype, buffer, len(buffer))
+          manifest['system_header_library_mismatch'] = buffer.value != b'EFTYPE'
+          manifest['header_uv_eftype'] = header_uv_eftype
+          (results / 'system-libuv.json').write_text(json.dumps(shared, indent=2) + '\n')
+
+          probe = r'''
+          const uv = process.binding('uv');
+          const util = require('node:util');
+          const map = uv.getErrorMap();
+          const values = [...new Set([uv.UV_EFTYPE, -134, -4028, uv.UV_EINVAL])];
+          console.log(JSON.stringify({
+            version: process.version, platform: process.platform, arch: process.arch,
+            libuv: process.versions.uv, shared: process.config.variables.node_shared_libuv,
+            UV_EFTYPE: uv.UV_EFTYPE,
+            errors: values.map(value => ({ value, map: map.get(value),
+              errname: uv.errname(value), message: uv.getErrorMessage(value),
+              publicName: util.getSystemErrorName(value) })),
+            mismatches: [...map].filter(([value, [name]]) => name !== uv.errname(value))
+          }, null, 2));
+          '''
+          observed = command_log('node-probe.json', [str(node), '-e', probe])
+          if observed.returncode:
+              raise RuntimeError('Node probe failed to execute')
+          manifest['node'] = json.loads(observed.stdout)
+          if manifest['node']['version'] != version:
+              raise RuntimeError('Downloaded source does not match binary version')
+          if target == 'debian-shared' and not manifest['node']['shared']:
+              raise RuntimeError('Debian binary does not use shared libuv; reproduction condition absent')
+
+          tests = {}
+          for test in ['test-uv-errmap', 'test-uv-errno']:
+              completed = command_log(f'{test}.txt',
+                                      [str(node), '--expose-internals', f'test/parallel/{test}.js'],
+                                      cwd=source_root, timeout=120)
+              tests[test] = completed.returncode
+          manifest['tests'] = tests
+          eftype_mismatch = any(entry[1][0] == 'EFTYPE' for entry in manifest['node']['mismatches'])
+          failed = any(tests.values()) or bool(manifest['node']['mismatches'])
+          manifest['classification'] = ('EFTYPE mismatch reproduced' if eftype_mismatch else
+                                        'Other mismatch or test failure' if failed else 'Consistent')
+          manifest['scope'] = ('Packaged shared Node; upstream release tests, not Debian patched tests'
+                               if manifest['node']['shared'] else
+                               'Bundled libuv control; does not test shared-libuv interoperability')
+          (results / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          print(json.dumps(manifest, indent=2))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(f"### {target}: {version}\n\n")
+              summary.write(f"**{manifest['classification']}**\n\n{manifest['scope']}\n\n")
+              summary.write('```json\n' + json.dumps(manifest, indent=2) + '\n```\n')
+          raise SystemExit(1 if failed else 0)
+          PY
+
+      - name: Save diagnostic results even when tests fail
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: uv-errno-${{ matrix.target }}
+          path: results/
+          if-no-files-found: warn
