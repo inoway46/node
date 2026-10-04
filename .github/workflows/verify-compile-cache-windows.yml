@@ -1,0 +1,123 @@
+name: Verify compile cache Windows distributed binaries
+
+on:
+  push:
+    branches: [verify-compile-cache-windows]
+    paths: [.github/workflows/verify-compile-cache-windows.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.repository == 'inoway46/node'
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - name: Compare official binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:GITHUB_WORKSPACE 'results'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $versions = @('v24.18.0', 'v24.21.0', 'v26.10.0', 'v27.0.0-nightly202610032bcc5dd2ee')
+          $lengths = @(200, 220, 230, 235, 239, 240, 241, 244, 245, 246, 250, 255, 260, 280, 283, 300)
+          $bases = @((Join-Path $env:TEMP 'cc-repro'), (Join-Path $env:USERPROFILE 'AppData\Local\Temp\cc-repro')) | Select-Object -Unique
+          $environment = [ordered]@{
+            os = [Environment]::OSVersion.VersionString
+            image = $env:ImageVersion
+            runner = $env:RUNNER_OS
+            arch = $env:RUNNER_ARCH
+            longPathsEnabled = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem').LongPathsEnabled
+            bases = $bases
+            timeoutMs = 6000
+            nightlySource = '2bcc5dd2ee'
+            fix = '69f3ae9e8a66e601acde539f7df8690f0d41653f'
+          }
+          $environment | ConvertTo-Json -Depth 5 | Set-Content "$out/environment.json"
+          $all = [System.Collections.Generic.List[object]]::new()
+          foreach ($version in $versions) {
+            $origin = if ($version.Contains('nightly')) { 'https://nodejs.org/download/nightly' } else { 'https://nodejs.org/dist' }
+            $dir = Join-Path $env:RUNNER_TEMP $version
+            New-Item -ItemType Directory -Force $dir | Out-Null
+            $exe = Join-Path $dir 'node.exe'
+            $url = "$origin/$version/win-x64/node.exe"
+            Invoke-WebRequest "$origin/$version/SHASUMS256.txt" -OutFile "$dir/SHASUMS256.txt"
+            Invoke-WebRequest $url -OutFile $exe
+            $line = Get-Content "$dir/SHASUMS256.txt" | Where-Object { $_ -match '\s+win-x64/node\.exe$' }
+            if (@($line).Count -ne 1) { throw "Missing checksum for $version" }
+            $expected = ($line -split '\s+')[0]
+            $actual = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) { throw "Checksum mismatch for $version" }
+            $metadata = & $exe -p 'JSON.stringify({version:process.version,arch:process.arch,versions:process.versions})'
+            if ($LASTEXITCODE -ne 0) { throw "Cannot execute $version" }
+            if (($metadata | ConvertFrom-Json).version -ne $version) { throw 'Version mismatch' }
+            [ordered]@{url=$url; sha256=$actual; runtime=($metadata | ConvertFrom-Json)} | ConvertTo-Json -Depth 5 | Set-Content "$out/$version.json"
+            foreach ($base in $bases) {
+              # Remove each version's fixtures so every binary starts identically.
+              if (Test-Path -LiteralPath $base) { Remove-Item -LiteralPath $base -Recurse -Force }
+              New-Item -ItemType Directory -Force $base | Out-Null
+              foreach ($len in $lengths) {
+                $p = $base
+                $i = 0
+                while ($p.Length -lt $len) { $p = Join-Path $p ('d' + ($i++)) }
+                $p = $p.Substring(0, $len).TrimEnd('\')
+                $psi = [System.Diagnostics.ProcessStartInfo]::new($exe)
+                $psi.UseShellExecute = $false
+                $psi.RedirectStandardOutput = $true
+                $psi.RedirectStandardError = $true
+                foreach ($key in @('NODE_OPTIONS', 'NODE_COMPILE_CACHE', 'NODE_DISABLE_COMPILE_CACHE')) {
+                  [void]$psi.Environment.Remove($key)
+                }
+                $psi.ArgumentList.Add('-e')
+                $psi.ArgumentList.Add('console.log(JSON.stringify(require("node:module").enableCompileCache(process.argv[1])))')
+                $psi.ArgumentList.Add($p)
+                $watch = [System.Diagnostics.Stopwatch]::StartNew()
+                $proc = [System.Diagnostics.Process]::Start($psi)
+                $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+                $stderrTask = $proc.StandardError.ReadToEndAsync()
+                $hung = -not $proc.WaitForExit(6000)
+                if ($hung) { $proc.Kill($true); $proc.WaitForExit() }
+                $watch.Stop()
+                $stdout = $stdoutTask.GetAwaiter().GetResult().Trim()
+                $stderr = $stderrTask.GetAwaiter().GetResult().Trim()
+                $result = $null
+                $outcome = if ($hung) { 'HANG' } elseif ($proc.ExitCode -ne 0) { 'ERROR' } else { 'RETURNED' }
+                if ($outcome -eq 'RETURNED') {
+                  try {
+                    $result = $stdout | ConvertFrom-Json
+                    if ($null -eq $result.status -or $result.status -notin @(0, 1)) { $outcome = 'ERROR' }
+                  } catch { $outcome = 'ERROR' }
+                }
+                $row = [ordered]@{
+                  version=$version; base=$base; requestedLength=$len; length=$p.Length; path=$p
+                  outcome=$outcome; elapsedMs=$watch.ElapsedMilliseconds; exitCode=$proc.ExitCode
+                  result=$result; stdout=$stdout; stderr=$stderr
+                }
+                $all.Add([pscustomobject]$row)
+                $row | ConvertTo-Json -Depth 5 -Compress | Add-Content "$out/results.jsonl"
+                Write-Host "$version | $($p.Length) | $outcome | $stdout"
+                $proc.Dispose()
+              }
+            }
+          }
+          $all | ConvertTo-Json -Depth 6 | Set-Content "$out/results.json"
+          $summary = @('| Version | Trials | HANG | Returned | Error |', '|---|---:|---:|---:|---:|')
+          foreach ($version in $versions) {
+            $rows = @($all | Where-Object version -eq $version)
+            $hangs = @($rows | Where-Object outcome -eq 'HANG').Count
+            $returned = @($rows | Where-Object outcome -eq 'RETURNED').Count
+            $errors = @($rows | Where-Object outcome -eq 'ERROR').Count
+            $summary += "| $version | $($rows.Count) | $hangs | $returned | $errors |"
+          }
+          $summary | Set-Content "$out/summary.md"
+          $summary | Add-Content $env:GITHUB_STEP_SUMMARY
+          if (@($all | Where-Object outcome -eq 'ERROR').Count -gt 0) { throw 'Unexpected runtime or harness error; inspect results' }
+      - name: Save evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-cache-windows-results
+          path: results/
+          if-no-files-found: error
+          retention-days: 14
