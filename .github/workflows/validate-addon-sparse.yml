@@ -1,0 +1,36 @@
+name: Validate addon sparse checkout
+
+on:
+  push:
+    branches: [lint-addon-docs-sparse-validation]
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-slim
+    strategy:
+      fail-fast: false
+      matrix:
+        checkout: [full, sparse]
+        repeat: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: ${{ matrix.checkout == 'sparse' && '/*
+            !/deps/' || '' }}
+          sparse-checkout-cone-mode: false
+      - name: Use Node.js lts/*
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: lts/*
+      - name: Lint addon docs
+        run: NODE=$(command -v node) make lint-addon-docs
+      - name: Verify generated examples
+        run: |
+          find test/addons -path 'test/addons/??_*/*' -type f -print0 |
+            sort -z | xargs -0 sha256sum | sha256sum
+          du -sh .git
+          du -sh --exclude=.git .
