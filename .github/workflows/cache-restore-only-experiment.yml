@@ -1,3 +1,4 @@
+# Exercise pull_request cache scope without changing lint inputs.
 name: Cache restore-only experiment
 
 on:
