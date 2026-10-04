@@ -1,0 +1,174 @@
+name: Lint addon docs checkout experiment (128 each)
+
+on:
+  push:
+    branches: [lint-addon-docs-benchmark-128]
+    paths: [.github/workflows/lint-addon-docs-experiment.yml]
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: lts/*
+  SOURCE_SHA: 8418d63100972401b326dd19e5ee5e92e4a77903
+
+jobs:
+  full:
+    if: github.repository == 'inoway46/node'
+    name: lint-addon-docs / full / ${{ matrix.trial }}
+    runs-on: ubuntu-slim
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        trial: [1, 2, 3, 4, 5, 6, 7, 8,
+                9, 10, 11, 12, 13, 14, 15, 16,
+                17, 18, 19, 20, 21, 22, 23, 24,
+                25, 26, 27, 28, 29, 30, 31, 32,
+                33, 34, 35, 36, 37, 38, 39, 40,
+                41, 42, 43, 44, 45, 46, 47, 48,
+                49, 50, 51, 52, 53, 54, 55, 56,
+                57, 58, 59, 60, 61, 62, 63, 64,
+                65, 66, 67, 68, 69, 70, 71, 72,
+                73, 74, 75, 76, 77, 78, 79, 80,
+                81, 82, 83, 84, 85, 86, 87, 88,
+                89, 90, 91, 92, 93, 94, 95, 96,
+                97, 98, 99, 100, 101, 102, 103, 104,
+                105, 106, 107, 108, 109, 110, 111, 112,
+                113, 114, 115, 116, 117, 118, 119, 120,
+                121, 122, 123, 124, 125, 126, 127, 128]
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Lint addon docs
+        run: NODE=$(command -v node) make lint-addon-docs
+
+  sparse:
+    if: github.repository == 'inoway46/node'
+    name: lint-addon-docs / sparse / ${{ matrix.trial }}
+    runs-on: ubuntu-slim
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        trial: [1, 2, 3, 4, 5, 6, 7, 8,
+                9, 10, 11, 12, 13, 14, 15, 16,
+                17, 18, 19, 20, 21, 22, 23, 24,
+                25, 26, 27, 28, 29, 30, 31, 32,
+                33, 34, 35, 36, 37, 38, 39, 40,
+                41, 42, 43, 44, 45, 46, 47, 48,
+                49, 50, 51, 52, 53, 54, 55, 56,
+                57, 58, 59, 60, 61, 62, 63, 64,
+                65, 66, 67, 68, 69, 70, 71, 72,
+                73, 74, 75, 76, 77, 78, 79, 80,
+                81, 82, 83, 84, 85, 86, 87, 88,
+                89, 90, 91, 92, 93, 94, 95, 96,
+                97, 98, 99, 100, 101, 102, 103, 104,
+                105, 106, 107, 108, 109, 110, 111, 112,
+                113, 114, 115, 116, 117, 118, 119, 120,
+                121, 122, 123, 124, 125, 126, 127, 128]
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+          sparse-checkout: |
+            /*
+            !/deps/
+          sparse-checkout-cone-mode: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Lint addon docs
+        run: NODE=$(command -v node) make lint-addon-docs
+
+  summarize:
+    if: ${{ always() && github.repository == 'inoway46/node' }}
+    needs: [full, sparse]
+    runs-on: ubuntu-slim
+    permissions:
+      actions: read
+    steps:
+      - name: Collect all job results
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100" \
+            > jobs.json
+      - name: Summarize timings
+        run: |
+          python3 - <<'PY'
+          import collections
+          import datetime
+          import json
+          import math
+          import os
+          import statistics
+
+          with open('jobs.json') as source:
+              jobs = [job for page in json.load(source) for job in page['jobs']]
+
+          def seconds(item):
+              if not item.get('started_at') or not item.get('completed_at'):
+                  return None
+              return (datetime.datetime.fromisoformat(item['completed_at'].replace('Z', '+00:00')) -
+                      datetime.datetime.fromisoformat(item['started_at'].replace('Z', '+00:00'))).total_seconds()
+
+          def stats(values):
+              values = sorted(value for value in values if value is not None)
+              if not values:
+                  return None
+              return dict(n=len(values), mean=statistics.mean(values), median=statistics.median(values),
+                          sd=statistics.stdev(values) if len(values) > 1 else 0,
+                          p90=values[math.ceil(len(values) * .90) - 1],
+                          p99=values[math.ceil(len(values) * .99) - 1], min=values[0], max=values[-1])
+
+          result = dict(source_sha=os.environ['SOURCE_SHA'], variants={})
+          lines = ['# Lint addon docs checkout comparison', '', f"Source: `{result['source_sha']}`", '',
+                   'Runner: `ubuntu-slim`; Node.js: `lts/*`; 128 independent jobs per variant; max-parallel: 5 each.', '',
+                   'Timings below are seconds for successful jobs only. Job duration excludes queue time.', '',
+                   '| Variant | Success | Conclusions |', '|---|---:|---|']
+          for variant in ['full', 'sparse']:
+              selected = [job for job in jobs if job['name'].startswith(f'lint-addon-docs / {variant} / ')]
+              assert len(selected) == 128, (variant, len(selected))
+              assert all(job['status'] == 'completed' for job in selected), variant
+              good = [job for job in selected if job['conclusion'] == 'success']
+              counts = dict(collections.Counter(job['conclusion'] for job in selected))
+              timings = {'Job total': stats([seconds(job) for job in good])}
+              for step_name in ['Checkout source', 'Set up Node.js', 'Lint addon docs']:
+                  timings[step_name] = stats([seconds(step) for job in good for step in job['steps']
+                                             if step['name'] == step_name and step['conclusion'] == 'success'])
+              result['variants'][variant] = dict(conclusions=counts, timings=timings)
+              lines.append(f'| {variant} | {len(good)}/128 | {json.dumps(counts)} |')
+          lines += ['', '| Variant | Phase | N | Mean | Median | P90 | P99 | Min | Max |',
+                    '|---|---|---:|---:|---:|---:|---:|---:|---:|']
+          for variant, data in result['variants'].items():
+              for phase, timing in data['timings'].items():
+                  if timing is not None:
+                      values = ' | '.join(f'{timing[key]:.2f}' for key in ['mean', 'median', 'p90', 'p99', 'min', 'max'])
+                      lines.append(f"| {variant} | {phase} | {timing['n']} | {values} |")
+          with open('comparison.json', 'w') as destination:
+              json.dump(result, destination, indent=2)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as destination:
+              destination.write('\n'.join(lines) + '\n')
+          print(json.dumps(result, indent=2))
+          PY
+      - name: Preserve raw results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lint-addon-docs-128-results
+          path: |
+            jobs.json
+            comparison.json
+          retention-days: 30
