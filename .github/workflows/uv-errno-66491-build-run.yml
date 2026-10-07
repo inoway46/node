@@ -1,0 +1,302 @@
+name: Build and compare a shared-libuv Node binary
+
+on:
+  workflow_call:
+    inputs:
+      node_sha:
+        required: true
+        type: string
+      label:
+        required: true
+        type: string
+      variant:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    if: github.repository == 'inoway46/node'
+    runs-on: ubuntu-24.04
+    container: debian:forky
+    timeout-minutes: 120
+    env:
+      NODE_SHA: ${{ inputs.node_sha }}
+      NODE_LABEL: ${{ inputs.label }}
+      VARIANT: ${{ inputs.variant }}
+      UV_BEFORE_SHA: 49b1c064714b412d7f7a2f5e7146c977554e57f9
+      UV_FIXED_SHA: a4d2bec8a2fc437ab98bc0741b6e4261a2cc475e
+      WORK_DIRECTORY: /tmp/uv-errno-build
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates cmake g++ gcc make python3 xz-utils
+
+      - name: Prepare comparison harness
+        shell: bash
+        run: |
+          mkdir -p "$WORK_DIRECTORY/results"
+          cat > "$WORK_DIRECTORY/compare.py" <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import shlex
+          import shutil
+          import subprocess
+          import sys
+          import tarfile
+          import urllib.request
+
+          root = Path(os.environ['WORK_DIRECTORY'])
+          results = root / 'results'
+          variant = os.environ['VARIANT']
+          if variant not in ('legacy', 'current', 'fixed'):
+              raise ValueError('Invalid header variant')
+          node_sha = os.environ['NODE_SHA']
+          uv_shas = {'before': os.environ['UV_BEFORE_SHA'],
+                     'fixed': os.environ['UV_FIXED_SHA']}
+          for sha in (node_sha, *uv_shas.values()):
+              if not re.fullmatch('[0-9a-f]{40}', sha):
+                  raise ValueError('Source revisions must be exact commit SHAs')
+
+          def save(name, value):
+              (results / name).write_text(json.dumps(value, indent=2) + '\n')
+
+          def digest(path):
+              with path.open('rb') as stream:
+                  return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+          def run(name, args, *, cwd=None, env=None, check=True):
+              print(f'{name}: {shlex.join(map(str, args))}', flush=True)
+              with (results / name).open('w') as log:
+                  completed = subprocess.run(args, cwd=cwd, env=env, stdout=log,
+                                             stderr=subprocess.STDOUT)
+              if check and completed.returncode:
+                  print((results / name).read_text()[-12000:], flush=True)
+                  raise RuntimeError(f'{name}: exit {completed.returncode}')
+              return completed.returncode
+
+          def download(repo, sha, destination):
+              archive = root / f'{repo.split("/")[1]}-{sha}.tar.gz'
+              url = f'https://codeload.github.com/{repo}/tar.gz/{sha}'
+              print(f'Download {url}', flush=True)
+              with urllib.request.urlopen(url, timeout=120) as response:
+                  with archive.open('wb') as stream:
+                      shutil.copyfileobj(response, stream)
+              save(f'{destination.name}-source.json', {
+                  'repository': repo, 'commit': sha, 'url': url,
+                  'archive_sha256': digest(archive)})
+              unpack = root / f'{destination.name}-unpack'
+              unpack.mkdir()
+              with tarfile.open(archive) as source:
+                  source.extractall(unpack, filter='data')
+              directories = list(unpack.iterdir())
+              if len(directories) != 1 or not directories[0].is_dir():
+                  raise RuntimeError('Unexpected source archive layout')
+              directories[0].rename(destination)
+              unpack.rmdir()
+              archive.unlink()
+
+          def shim(era):
+              path = root / f'errno-{era}.h'
+              text = '#include <errno.h>\n#undef EFTYPE\n'
+              if era == 'current':
+                  text += '#define EFTYPE 134\n'
+              path.write_text(text)
+              shutil.copyfile(path, results / path.name)
+              return path
+
+          def prefix(state):
+              return root / f'uv-{state}-install'
+
+          def runtime_env(state):
+              env = os.environ.copy()
+              env['LD_LIBRARY_PATH'] = str(prefix(state) / 'lib')
+              return env
+
+          def libraries():
+              run('packages.log', ['dpkg-query', '-W'])
+              run('kernel.log', ['uname', '-a'])
+              run('compiler.log', ['g++', '--version'])
+              for era in ('legacy', 'current'):
+                  shim(era)
+              source_probe = root / 'header-probe.c'
+              source_probe.write_text('''#include <stdio.h>
+          #include <uv.h>
+          int main(void) {
+            printf("%d %s %s\\n", UV_EFTYPE, uv_err_name(UV_EFTYPE),
+                   uv_err_name(UV_EINVAL));
+            return 0;
+          }
+          ''')
+              shutil.copyfile(source_probe, results / source_probe.name)
+              probes = {}
+              for state, sha in uv_shas.items():
+                  source = root / f'uv-{state}-source'
+                  download('libuv/libuv', sha, source)
+                  shutil.copyfile(source / 'include/uv/errno.h',
+                                  results / f'errno-{state}.h')
+                  build = root / f'uv-{state}-build'
+                  run(f'uv-{state}-configure.log', [
+                      'cmake', '-S', str(source), '-B', str(build),
+                      '-DCMAKE_BUILD_TYPE=Release',
+                      f'-DCMAKE_INSTALL_PREFIX={prefix(state)}',
+                      '-DCMAKE_INSTALL_LIBDIR=lib', '-DLIBUV_BUILD_TESTS=OFF',
+                      '-DLIBUV_BUILD_BENCH=OFF',
+                      f'-DCMAKE_C_FLAGS=-include {root / "errno-legacy.h"}'])
+                  run(f'uv-{state}-build.log',
+                      ['cmake', '--build', str(build), '--parallel', '4'])
+                  run(f'uv-{state}-install.log',
+                      ['cmake', '--install', str(build)])
+                  for era in ('legacy', 'current'):
+                      binary = root / f'probe-{state}-{era}'
+                      run(f'probe-{state}-{era}-build.log', [
+                          'gcc', '-include', str(root / f'errno-{era}.h'),
+                          '-I', str(prefix(state) / 'include'), str(source_probe),
+                          '-L', str(prefix(state) / 'lib'), '-luv', '-o', str(binary)])
+                      log = f'probe-{state}-{era}.log'
+                      run(log, [str(binary)], env=runtime_env(state))
+                      observed = (results / log).read_text().strip().split()
+                      value = -4028 if state == 'before' and era == 'legacy' else -134
+                      name = 'Unknown system error -134' if state == 'before' and era == 'current' else 'EFTYPE'
+                      expected = f'{value} {name} EINVAL'
+                      assert (results / log).read_text().strip() == expected, observed
+                      probes[f'{state}-{era}'] = expected
+              save('header-probes.json', probes)
+
+          def node():
+              source = root / 'node-source'
+              download('nodejs/node', node_sha, source)
+              state = 'fixed' if variant == 'fixed' else 'before'
+              era = 'current' if variant == 'current' else 'legacy'
+              env = runtime_env(state)
+              # Compiler wrappers apply the same simulated errno header to every TU.
+              for key, compiler in (('CC', 'gcc'), ('CXX', 'g++')):
+                  wrapper = root / key.lower()
+                  wrapper.write_text('#!/bin/sh\nexec ' + compiler + ' -include ' +
+                                     shlex.quote(str(root / f'errno-{era}.h')) + ' "$@"\n')
+                  wrapper.chmod(0o755)
+                  env[key] = str(wrapper)
+              options = ['--shared-libuv',
+                         f'--shared-libuv-includes={prefix(state) / "include"}',
+                         f'--shared-libuv-libpath={prefix(state) / "lib"}',
+                         '--with-intl=none', '--without-node-snapshot',
+                         '--without-node-code-cache']
+              if '--v8-disable-temporal-support' in (source / 'configure.py').read_text():
+                  options.append('--v8-disable-temporal-support')
+              save('build-options.json', {
+                  'node_sha': node_sha, 'node_label': os.environ['NODE_LABEL'],
+                  'uv_shas': uv_shas, 'variant': variant,
+                  'simulated_header': era, 'build_libuv': state,
+                  'configure': options, 'CC': env['CC'], 'CXX': env['CXX'],
+                  'scope': 'Linux x86_64; EFTYPE header condition simulated; ICU and snapshots disabled'})
+              run('node-configure.log', ['python3', 'configure.py', *options],
+                  cwd=source, env=env)
+              run('node-build.log', ['make', '-j4'], cwd=source, env=env)
+              for name in ('config.gypi', 'config.mk'):
+                  shutil.copyfile(source / name, results / name)
+
+          def verify():
+              source = root / 'node-source'
+              binary = source / 'out/Release/node'
+              probe = root / 'node-probe.js'
+              probe.write_text('''const uv = process.binding('uv');
+          const util = require('node:util');
+          const map = uv.getErrorMap();
+          console.log(JSON.stringify({
+            version: process.version, platform: process.platform, arch: process.arch,
+            libuv: process.versions.uv, shared: process.config.variables.node_shared_libuv,
+            UV_EFTYPE: uv.UV_EFTYPE, name: uv.errname(uv.UV_EFTYPE),
+            message: uv.getErrorMessage(uv.UV_EFTYPE),
+            publicName: util.getSystemErrorName(uv.UV_EFTYPE),
+            EINVAL: uv.errname(uv.UV_EINVAL),
+            mismatches: [...map].filter(([value, [name]]) => name !== uv.errname(value))
+          }, null, 2));
+          ''')
+              shutil.copyfile(probe, results / probe.name)
+              manifest = json.loads((results / 'build-options.json').read_text())
+              manifest['node_binary_sha256'] = digest(binary)
+              manifest['runtimes'] = {}
+              failures = []
+              for state in uv_shas:
+                  env = runtime_env(state)
+                  run(f'ldd-{state}.log', ['ldd', str(binary)], env=env)
+                  ldd = (results / f'ldd-{state}.log').read_text()
+                  match = re.search(r'libuv\.so\.1 => (\S+)', ldd)
+                  expected_library = (prefix(state) / 'lib/libuv.so.1').resolve()
+                  if not match or Path(match[1]).resolve() != expected_library:
+                      raise RuntimeError('Node did not load the intended shared libuv')
+                  log = f'node-probe-{state}.json'
+                  run(log, [str(binary), str(probe)], env=env)
+                  observed = json.loads((results / log).read_text())
+                  expected_value = -4028 if variant == 'legacy' else -134
+                  consistent = (variant == 'legacy') == (state == 'before')
+                  expected_name = 'EFTYPE' if consistent else f'Unknown system error {expected_value}'
+                  if (observed['UV_EFTYPE'] != expected_value or
+                          observed['name'] != expected_name or
+                          observed['publicName'] != 'EFTYPE' or
+                          observed['EINVAL'] != 'EINVAL' or
+                          observed['platform'] != 'linux' or observed['arch'] != 'x64' or
+                          observed['shared'] not in (True, 1, 'true')):
+                      failures.append(f'{state}: unexpected Node probe')
+                  expected_mismatches = [] if consistent else [[expected_value, ['EFTYPE', 'inappropriate file type or format']]]
+                  if observed['mismatches'] != expected_mismatches:
+                      failures.append(f'{state}: unexpected error-map mismatches')
+                  tests = {}
+                  for test in ('test-uv-errno', 'test-uv-errmap'):
+                      log = f'{test}-{state}.log'
+                      code = run(log, [str(binary), '--expose-internals',
+                                       f'test/parallel/{test}.js'], cwd=source,
+                                 env=env, check=False)
+                      text = (results / log).read_text()
+                      expected_failure = (code == 1 and 'ERR_ASSERTION' in text and
+                                          'EFTYPE' in text and expected_name in text)
+                      passed = code == 0 if consistent else expected_failure
+                      tests[test] = {'exit_code': code, 'expected_consistent': consistent,
+                                     'matches_expectation': passed}
+                      if not passed:
+                          failures.append(f'{state}/{test}: unexpected result')
+                  manifest['runtimes'][state] = {
+                      'shared_library': str(expected_library),
+                      'shared_library_sha256': digest(expected_library),
+                      'expected_consistent': consistent, 'probe': observed, 'tests': tests}
+              manifest['failures'] = failures
+              save('manifest.json', manifest)
+              print(json.dumps(manifest, indent=2), flush=True)
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+                  summary.write(f'### {os.environ["NODE_LABEL"]}: {variant}\n\n')
+                  summary.write('Expected mismatches are checked as reproduction/compatibility observations.\n\n')
+                  summary.write('| Runtime libuv | UV_EFTYPE | Name | Tests |\n|---|---:|---|---|\n')
+                  for state, entry in manifest['runtimes'].items():
+                      codes = ', '.join(f'{name}: {test["exit_code"]}' for name, test in entry['tests'].items())
+                      summary.write(f'| {state} | {entry["probe"]["UV_EFTYPE"]} | {entry["probe"]["name"]} | {codes} |\n')
+                  summary.write(f'\nUnexpected results: {failures}\n')
+              if failures:
+                  raise RuntimeError('Comparison did not match expected outcomes')
+
+          {'libraries': libraries, 'node': node, 'verify': verify}[sys.argv[1]]()
+          PY
+          cp "$WORK_DIRECTORY/compare.py" "$WORK_DIRECTORY/results/compare.py"
+
+      - name: Build libuv before and after the upstream fix
+        run: python3 "$WORK_DIRECTORY/compare.py" libraries
+
+      - name: Build Node against the selected headers
+        run: python3 "$WORK_DIRECTORY/compare.py" node
+
+      - name: Verify both runtime libraries and existing tests
+        run: python3 "$WORK_DIRECTORY/compare.py" verify
+
+      - name: Save build provenance and comparison results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: uv-errno-build-${{ inputs.label }}-${{ inputs.variant }}
+          path: /tmp/uv-errno-build/results/
+          if-no-files-found: warn

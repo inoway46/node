@@ -1,0 +1,33 @@
+name: Build shared libuv EFTYPE comparison (66491)
+
+on:
+  push:
+    branches: [investigate-uv-errno-66491]
+    paths:
+      - .github/workflows/uv-errno-66491-build.yml
+      - .github/workflows/uv-errno-66491-build-run.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  main:
+    if: github.repository == 'inoway46/node'
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [legacy, current, fixed]
+    uses: ./.github/workflows/uv-errno-66491-build-run.yml
+    with:
+      node_sha: 554dd55eb86974fdbc9c84c7e006409df943acd2
+      label: main
+      variant: ${{ matrix.variant }}
+
+  reported-release:
+    needs: main
+    uses: ./.github/workflows/uv-errno-66491-build-run.yml
+    with:
+      node_sha: 955266bfdd854cd280dffd47548673914484e4c0
+      label: v24.21.0
+      variant: fixed
