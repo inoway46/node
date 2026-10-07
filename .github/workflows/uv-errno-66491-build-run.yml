@@ -176,15 +176,23 @@ jobs:
               state = 'fixed' if variant == 'fixed' else 'before'
               era = 'current' if variant == 'current' else 'legacy'
               env = runtime_env(state)
-              # Compiler wrappers apply the same simulated errno header to every TU.
-              for key, compiler in (('CC', 'gcc'), ('CXX', 'g++')):
-                  wrapper = root / key.lower()
-                  wrapper.write_text('#!/bin/sh\nexec ' + compiler + ' -include ' +
-                                     shlex.quote(str(root / f'errno-{era}.h')) + ' "$@"\n')
-                  wrapper.chmod(0o755)
-                  env[key] = str(wrapper)
+              # Limit the simulation to libuv headers; compiler detection and
+              # assembler inputs must not receive C declarations from errno.h.
+              headers = root / 'node-uv-include'
+              shutil.copytree(prefix(state) / 'include', headers)
+              errno = headers / 'uv/errno.h'
+              text = errno.read_text()
+              marker = '#include <errno.h>'
+              assert text.count(marker) == 1
+              condition = '\n#undef EFTYPE\n'
+              if era == 'current':
+                  condition += '#define EFTYPE 134\n'
+              errno.write_text(text.replace(marker, marker + condition))
+              shutil.copyfile(errno, results / 'errno-node-selected.h')
+              env['CC'] = 'gcc'
+              env['CXX'] = 'g++'
               options = ['--shared-libuv',
-                         f'--shared-libuv-includes={prefix(state) / "include"}',
+                         f'--shared-libuv-includes={headers}',
                          f'--shared-libuv-libpath={prefix(state) / "lib"}',
                          '--with-intl=none', '--without-node-snapshot',
                          '--without-node-code-cache']
