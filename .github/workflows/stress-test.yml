@@ -1,35 +1,17 @@
-name: Stress Test (rebase tested branch on main for cache reuse)
+name: Debugger startup race observation
 
 on:
   workflow_dispatch:
     inputs:
-      test_path:
-        description: Test path or glob (e.g. test/parallel/test-debugger-break.js or "test/parallel/test-debugger-*")
-        required: true
-        type: string
-      os:
-        description: Runner to use
-        required: true
-        default: macos-15
-        type: choice
-        options:
-          - macos-15
-          - ubuntu-24.04
-          - ubuntu-24.04-arm
       repeat:
-        description: Number of times to repeat each test (--repeat)
+        description: Repetitions per test and condition
         required: true
         default: '1000'
         type: string
       test_jobs:
-        description: Number of jobs to run in parallel (-j).
+        description: Parallel test processes
         required: true
-        default: '1'
-        type: string
-      test_args:
-        description: Extra args for tools/test.py, space-separated (e.g. "-t 10 --worker")
-        required: false
-        default: ''
+        default: '16'
         type: string
 
 env:
@@ -43,11 +25,15 @@ permissions:
 
 jobs:
   stress-test:
-    runs-on: ${{ inputs.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [fixed, bypass]
+    timeout-minutes: 120
+    runs-on: macos-15
     env:
-      # Linux builds with clang (matching test-linux.yml), macOS with gcc/g++.
-      CC: ${{ startsWith(inputs.os, 'ubuntu') && 'sccache clang-19' || 'sccache gcc' }}
-      CXX: ${{ startsWith(inputs.os, 'ubuntu') && 'sccache clang++-19' || 'sccache g++' }}
+      CC: sccache gcc
+      CXX: sccache g++
       # Enable sccache - this is okay for a manually-dispatched workflow that is typically used to
       # test lib-only or test-only deflaking changes. This should be able to pick up cache from
       # test-linux.yml and test-macos.yml running on the main branch.
@@ -58,11 +44,6 @@ jobs:
         with:
           persist-credentials: false
           path: node
-      - name: Install Clang ${{ env.CLANG_VERSION }}
-        if: runner.os == 'Linux'
-        uses: $/.github/actions/install-clang
-        with:
-          clang-version: ${{ env.CLANG_VERSION }}
       - name: Set up Xcode ${{ env.XCODE_VERSION }}
         if: runner.os == 'macOS'
         run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app
@@ -96,19 +77,84 @@ jobs:
           echo "::endgroup::"
       - name: Build
         run: make -C node build-ci -j"$(getconf _NPROCESSORS_ONLN)" V=1 CONFIG_FLAGS="--error-on-warn --v8-enable-temporal-support"
-      - name: Stress run ${{ inputs.test_path }} x${{ inputs.repeat }}
-        shell: bash
+      - name: Record revision and condition
+        run: |
+          mkdir -p results
+          git -C node rev-parse HEAD > results/revision.txt
+          node/out/Release/node --version > results/node-version.txt
+          printf '%s\n' '${{ matrix.mode }}' > results/condition.txt
+          uname -a > results/platform.txt
+      - name: Repeat both debugger tests
         env:
           REPEAT: ${{ inputs.repeat }}
           JOBS: ${{ inputs.test_jobs }}
-          TEST_ARGS: ${{ inputs.test_args }}
-          TEST_PATH: ${{ inputs.test_path }}
+          NODE_DEBUGGER_STARTUP_RACE_MODE: ${{ matrix.mode }}
+          VERBOSE: '1'
+        shell: bash
         run: |
           cd node
-          read -ra EXTRA_ARGS <<< "$TEST_ARGS"
-          python3 tools/test.py \
-            --repeat "$REPEAT" \
-            -j "$JOBS" \
-            -p actions \
-            "${EXTRA_ARGS[@]}" \
-            "$TEST_PATH"
+          for test in test-debugger-run-after-quit-restart test-debugger-exceptions; do
+            trace_dir="$GITHUB_WORKSPACE/results/$test/traces"
+            mkdir -p "$trace_dir"
+            export NODE_DEBUGGER_STARTUP_TRACE_DIR="$trace_dir"
+            set +e
+            python3 tools/test.py --repeat "$REPEAT" -j "$JOBS" -p tap \
+              --logfile "$GITHUB_WORKSPACE/results/$test/results.tap" \
+              "parallel/$test" \
+              > "$GITHUB_WORKSPACE/results/$test/runner.log" 2>&1
+            result=$?
+            set -e
+            printf '%s\n' "$result" > "$GITHUB_WORKSPACE/results/$test/exit-code.txt"
+            tail -n 20 "$GITHUB_WORKSPACE/results/$test/runner.log"
+          done
+      - name: Summarize transition evidence
+        if: always()
+        shell: python
+        run: |
+          import pathlib
+          import re
+          import os
+
+          root = pathlib.Path('results')
+          root.mkdir(exist_ok=True)
+          lines = ['## Startup race: ${{ matrix.mode }}']
+          for test in sorted(root.glob('test-*')):
+              traces = list((test / 'traces').glob('*.log'))
+              early = []
+              stranded = []
+              for trace in traces:
+                  events = trace.read_text().splitlines()
+                  early_indexes = [i for i, event in enumerate(events)
+                                   if 'event=release before=0 after=0' in event]
+                  if any(any('event=wait ' in later for later in events[i + 1:])
+                         for i in early_indexes):
+                      early.append(trace.name)
+                  if events and 'event=wait ' in events[-1]:
+                      stranded.append(trace.name)
+              tap_file = test / 'results.tap'
+              tap = tap_file.read_text() if tap_file.exists() else ''
+              passed = len(re.findall(r'^ok \d+\b', tap, re.M))
+              failed = len(re.findall(r'^not ok \d+\b', tap, re.M))
+              lines.extend([
+                  f'### {test.name}',
+                  f'- Passed / failed: {passed} / {failed}',
+                  f'- Trace files: {len(traces)}',
+                  f'- Release-before-wait candidates: {len(early)}',
+                  f'- Last transition is wait: {len(stranded)}',
+              ])
+              (test / 'early-release-candidates.txt').write_text('\n'.join(early))
+              (test / 'last-transition-wait.txt').write_text('\n'.join(stranded))
+          lines.append('Candidates need correlation with failing test output; '
+                       'PID reuse and normal termination can affect these counts.')
+          summary = '\n'.join(lines) + '\n'
+          (root / 'summary.md').write_text(summary)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
+              output.write(summary)
+      - name: Upload logs even when a previous step failed
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: debugger-startup-race-${{ matrix.mode }}
+          path: results/
+          retention-days: 14
+          if-no-files-found: error

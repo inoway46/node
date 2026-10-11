@@ -1,5 +1,7 @@
 #include "inspector_agent.h"
+#include <cinttypes>
 #include <cstddef>
+#include <cstdio>
 #include <memory>
 
 #include "crdtp/json.h"
@@ -542,7 +544,9 @@ class NodeInspectorClient : public V8InspectorClient {
   }
 
   void waitForFrontend() {
+    const bool before = waiting_for_frontend_;
     waiting_for_frontend_ = true;
+    traceStartupTransition("wait", before);
     for (const auto& id_channel : channels_) {
       id_channel.second->setWaitingForDebugger();
     }
@@ -588,7 +592,9 @@ class NodeInspectorClient : public V8InspectorClient {
   }
 
   void runIfWaitingForDebugger(int context_group_id) override {
+    const bool before = waiting_for_frontend_;
     waiting_for_frontend_ = false;
+    traceStartupTransition("release", before);
     for (const auto& id_channel : channels_) {
       id_channel.second->unsetWaitingForDebugger();
     }
@@ -781,6 +787,27 @@ class NodeInspectorClient : public V8InspectorClient {
   }
 
  private:
+  void traceStartupTransition(const char* event, bool before) {
+    std::string directory;
+    if (!credentials::SafeGetenv(
+            "NODE_DEBUGGER_STARTUP_TRACE_DIR", &directory, env_) ||
+        directory.empty()) {
+      return;
+    }
+    const int pid = static_cast<int>(uv_os_getpid());
+    const std::string path = directory + "/" + std::to_string(pid) + ".log";
+    FILE* trace = fopen(path.c_str(), "a");
+    if (trace == nullptr) return;
+    fprintf(trace,
+            "%" PRIu64 " pid=%d event=%s before=%d after=%d\n",
+            uv_hrtime(),
+            pid,
+            event,
+            before,
+            waiting_for_frontend_);
+    fclose(trace);
+  }
+
   bool shouldRunMessageLoop() {
     if (waiting_for_frontend_)
       return true;
