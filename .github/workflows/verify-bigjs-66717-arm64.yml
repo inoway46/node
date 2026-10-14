@@ -1,0 +1,62 @@
+name: Verify big.js 66717 on macOS arm64
+
+on:
+  # First push registers this fork-only workflow; builds require manual dispatch.
+  push:
+    branches: [verify-v26-bigjs-arm64]
+    paths:
+      - .github/workflows/verify-bigjs-66717-arm64.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  register:
+    if: github.repository == 'inoway46/node' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'Registered. Dispatch manually to run the arm64 comparison.'
+
+  compare:
+    if: github.repository == 'inoway46/node' && github.event_name == 'workflow_dispatch'
+    runs-on: macos-15
+    timeout-minutes: 330
+    env:
+      BEFORE_SHA: f88c2f8ec6731cc1a898028edf7dc505ad17224d
+      AFTER_SHA: 77e8e5c7d9808d155fad3b2a1594826e94385a2f
+    steps:
+      - name: Check out fork harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: harness
+          persist-credentials: false
+      - name: Check out exact source pair
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.AFTER_SHA }}
+          fetch-depth: 2
+          path: source
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Prepare experiment
+        run: |
+          test "$(uname -m)" = arm64
+          python3 -m pip install ninja==1.13.0
+          mkdir -p results repro
+          cp harness/.github/scripts/bigjs-66717-repro.mjs repro/repro.mjs
+          cd repro
+          npm install --ignore-scripts --save-exact big.js@7.0.1
+      - name: Clean builds and bounded before/after comparison
+        run: python3 harness/.github/scripts/verify-bigjs-66717.py
+      - name: Upload logs, metadata, results, and both binaries
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bigjs-66717-macos-arm64-${{ github.run_id }}
+          path: results/
+          retention-days: 14
+          if-no-files-found: warn
