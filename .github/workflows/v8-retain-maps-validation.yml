@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   validate:
-    name: Node ${{ inputs.version }} on macOS x64
+    name: Node ${{ inputs.version }} on macOS arm64
     runs-on: macos-15
     timeout-minutes: 360
     steps:
@@ -36,9 +36,32 @@ jobs:
         with:
           node-version: ${{ inputs.version }}
       - name: Confirm baseline retention
+        if: inputs.mode != 'jest'
         id: baseline
         continue-on-error: true
         run: node --expose-gc validation/.github/v8-retain-maps/verify.js '${{ inputs.mode }}' baseline
+      - name: Check out the original Issue fixture
+        if: inputs.mode == 'jest'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: markmssd/nodejs-repro
+          ref: bda6b076c39300c8491ebd31d89d6fcda4c1f946
+          persist-credentials: false
+          path: fixture
+      - name: Install locked Jest dependencies
+        if: inputs.mode == 'jest'
+        working-directory: fixture
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Confirm baseline retention with the original Jest fixture
+        if: inputs.mode == 'jest'
+        id: baseline_jest
+        continue-on-error: true
+        run: node validation/.github/v8-retain-maps/verify-jest.js "$(command -v node)" fixture baseline
+      - name: Confirm baseline retention with TurboFan
+        if: inputs.mode == 'jest'
+        id: baseline_turbofan
+        continue-on-error: true
+        run: node --expose-gc --no-maglev --allow-natives-syntax validation/.github/v8-retain-maps/verify-turbofan.js baseline
       - name: Apply the V8 fix
         run: |
           git -C node apply --check ../validation/.github/v8-retain-maps/upstream.patch
@@ -68,9 +91,16 @@ jobs:
         working-directory: node
         run: python3 tools/test.py -j2 parallel/test-vm-context parallel/test-vm-basic parallel/test-vm-measure-memory-multi-context
       - name: Check context retention with patched Node
+        if: inputs.mode != 'jest'
         run: node/out/Release/node --expose-gc validation/.github/v8-retain-maps/verify.js '${{ inputs.mode }}' fixed
+      - name: Check patched Node with the original Jest fixture
+        if: inputs.mode == 'jest'
+        run: node validation/.github/v8-retain-maps/verify-jest.js node/out/Release/node fixture fixed
+      - name: Check patched Node with TurboFan
+        if: inputs.mode == 'jest'
+        run: node/out/Release/node --expose-gc --no-maglev --allow-natives-syntax validation/.github/v8-retain-maps/verify-turbofan.js fixed
       - name: Require a reproducing baseline
-        if: steps.baseline.outcome != 'success'
+        if: steps.baseline.outcome == 'failure' || steps.baseline_jest.outcome == 'failure' || steps.baseline_turbofan.outcome == 'failure'
         run: |
-          echo 'The release baseline did not reproduce the reported retention.' >&2
+          echo 'A release baseline did not reproduce the reported retention.' >&2
           exit 1

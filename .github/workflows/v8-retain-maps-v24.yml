@@ -3,7 +3,7 @@ name: Validate V8 retained-map fix on Node 24.21.0
 on:
   push:
     branches:
-      - v8-retain-maps-aging
+      - v8-retain-maps-v24-jest
 
 permissions:
   contents: read
@@ -13,4 +13,4 @@ jobs:
     uses: ./.github/workflows/v8-retain-maps-validation.yml
     with:
       version: 24.21.0
-      mode: als
+      mode: jest
