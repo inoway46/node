@@ -51,10 +51,13 @@ const fixtures = require('../common/fixtures');
   assert.strictEqual(callSite.functionName, 'foo');
 }
 
-// Without --enable-source-maps the generated file path is preserved.
+// Without source map caching the generated file path is preserved.
 {
   const file = fixtures.path('source-map', 'get-call-sites-mapped.js');
-  const { status, stderr, stdout } = spawnSync(process.execPath, [file]);
+  const { status, stderr, stdout } = spawnSync(process.execPath, [file], {
+    // Coverage also enables source map caching.
+    env: { ...process.env, NODE_V8_COVERAGE: '' },
+  });
   assert.strictEqual(status, 0, stderr.toString());
   const callSite = JSON.parse(stdout.toString());
   assert.ok(
