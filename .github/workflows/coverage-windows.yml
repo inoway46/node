@@ -27,6 +27,34 @@ jobs:
           rustup --version
       - name: Build once
         run: ./vcbuild.bat clang-cl v8temporal
+      - name: Prepare reusable Windows binary
+        shell: pwsh
+        run: |
+          $artifactDir = Join-Path $env:RUNNER_TEMP 'windows-test-binary'
+          New-Item -ItemType Directory -Force $artifactDir | Out-Null
+          Copy-Item Release/node.exe $artifactDir
+          foreach ($file in @('Release/node.pdb', 'config.gypi')) {
+            if (Test-Path $file) { Copy-Item $file $artifactDir }
+          }
+          if (Test-Path .used_configure_flags) {
+            Copy-Item .used_configure_flags "$artifactDir/used-configure-flags.txt"
+          }
+          $metadata = [ordered]@{
+            sourceSha = (git rev-parse HEAD).Trim()
+            binarySha256 = (Get-FileHash Release/node.exe -Algorithm SHA256).Hash
+            buildCommand = './vcbuild.bat clang-cl v8temporal'
+            runnerImage = $env:ImageOS
+            runnerImageVersion = $env:ImageVersion
+            runId = $env:GITHUB_RUN_ID
+          }
+          $metadata | ConvertTo-Json | Set-Content "$artifactDir/build-info.json"
+      - name: Save reusable Windows binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: windows-test-binary-${{ github.run_id }}
+          path: ${{ runner.temp }}/windows-test-binary
+          retention-days: 30
+          if-no-files-found: error
       - name: Compare four tests with the same binary
         shell: pwsh
         run: |
