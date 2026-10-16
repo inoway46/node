@@ -1,106 +1,119 @@
 name: Coverage Windows
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths-ignore:
-      - '**.md'
-      - '**.nix'
-      - eslint.config.mjs
-      - '**/eslint.config_partial.mjs'
-      - android-configure
-      - android-configure.py
-      - android-patches/**
-      - benchmarks/**
-      - doc/**
-      - pyproject.yml
-      - tsconfig.json
-      - test/internet/**
-      - tools/actions/**
-      - tools/bootstrap/**
-      - tools/dep_updaters/**
-      - tools/doc/**
-      - tools/eslint-rules/**
-      - tools/eslint/**
-      - tools/lint-md/**
-      - tools/nix/**
-      - typings/**
-      - .**
-      - '!.github/workflows/coverage-windows.yml'
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - '**.md'
-      - '**.nix'
-      - eslint.config.mjs
-      - '**/eslint.config_partial.mjs'
-      - android-configure
-      - android-configure.py
-      - android-patches/**
-      - benchmarks/**
-      - doc/**
-      - pyproject.yml
-      - tsconfig.json
-      - test/internet/**
-      - tools/actions/**
-      - tools/bootstrap/**
-      - tools/dep_updaters/**
-      - tools/doc/**
-      - tools/eslint-rules/**
-      - tools/eslint/**
-      - tools/lint-md/**
-      - tools/nix/**
-      - typings/**
-      - .**
-      - '!.github/workflows/coverage-windows.yml'
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
-
-env:
-  PYTHON_VERSION: '3.15'
-  FLAKY_TESTS: keep_retrying
-  RUSTC_VERSION: '1.88'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  coverage-windows:
-    if: github.event.pull_request.draft == false
+  compare-nightly-coverage:
     runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      NIGHTLY_VERSION: v27.0.0-nightly202610161c90519c1a
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          ref: 1c90519c1a878499d1942f61eeec68dd8de457d7
           persist-credentials: false
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: '3.15'
           allow-prereleases: true
-      - name: Install deps
-        run: choco install nasm
-      - name: Install Rust ${{ env.RUSTC_VERSION }}
+      - name: Download official nightly without building
+        shell: pwsh
         run: |
-          rustup override set "$RUSTC_VERSION"
-          rustup --version
-      - name: Build
-        run: ./vcbuild.bat clang-cl v8temporal
-      # TODO(bcoe): investigate tests that fail with coverage enabled
-      # on Windows.
-      - name: Test
-        run: ./vcbuild.bat noprojgen nobuild test-ci-js; node -e 'process.exit(0)'
-        env:
-          NODE_V8_COVERAGE: ./coverage/tmp
-      - name: Report
-        run: npx c8 report
-        env:
-          NODE_OPTIONS: --max-old-space-size=8192
-      - name: Clean tmp
-        run: npx rimraf ./coverage/tmp
-      - name: Upload
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v7.1.1
+          $base = "https://nodejs.org/download/nightly/$env:NIGHTLY_VERSION"
+          New-Item -ItemType Directory -Force Release | Out-Null
+          Invoke-WebRequest "$base/win-x64/node.exe" -OutFile Release/node.exe
+          $checksums = (Invoke-WebRequest "$base/SHASUMS256.txt").Content
+          $line = @($checksums -split "`n" | Where-Object { $_ -match '\s+win-x64/node\.exe\s*$' })
+          if ($line.Count -ne 1) { throw 'Expected exactly one official checksum' }
+          $expected = ($line[0].Trim() -split '\s+')[0]
+          $actual = (Get-FileHash Release/node.exe -Algorithm SHA256).Hash
+          if ($actual -ne $expected) { throw 'Nightly checksum mismatch' }
+          $version = (& ./Release/node.exe --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $version -ne $env:NIGHTLY_VERSION) {
+            throw "Unexpected nightly version: $version"
+          }
+          $dir = Join-Path $env:RUNNER_TEMP 'nightly-binary'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Copy-Item Release/node.exe $dir
+          $info = [ordered]@{
+            version = $version
+            sourceSha = (git rev-parse HEAD).Trim()
+            binarySha256 = $actual
+            downloadUrl = "$base/win-x64/node.exe"
+          }
+          $info | ConvertTo-Json | Set-Content "$dir/nightly-info.json"
+          "Nightly: $version; verified SHA256: $actual" >> $env:GITHUB_STEP_SUMMARY
+      - name: Save nightly binary for reuse
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          directory: ./coverage
+          name: nightly-windows-binary-${{ github.run_id }}
+          path: ${{ runner.temp }}/nightly-binary
+          retention-days: 30
+          if-no-files-found: error
+      - name: Compare four tests with the same binary
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $binary = (Resolve-Path Release/node.exe).Path
+          $initialHash = (Get-FileHash $binary -Algorithm SHA256).Hash
+          $resultsDir = Join-Path $env:RUNNER_TEMP 'coverage-comparison'
+          New-Item -ItemType Directory -Force $resultsDir | Out-Null
+          $tests = @(
+            'es-module/test-vm-source-text-module-leak',
+            'parallel/test-child-process-exec-any-shells-windows',
+            'parallel/test-inspector-wait-for-connection',
+            'parallel/test-util-getcallsites-sourcemap'
+          )
+          $sha = (git rev-parse HEAD).Trim()
+          "Source: $sha`nBinary SHA256: $initialHash" | Set-Content "$resultsDir/provenance.txt"
+          "Source: $sha; binary SHA256: $initialHash" >> $env:GITHUB_STEP_SUMMARY
+          '| Round | Coverage | Test | Exit code | Seconds |' >> $env:GITHUB_STEP_SUMMARY
+          '| --- | --- | --- | --- | --- |' >> $env:GITHUB_STEP_SUMMARY
+          $rows = @()
+          foreach ($round in 1..3) {
+            foreach ($mode in @('off', 'on')) {
+              foreach ($test in $tests) {
+                $name = $test.Replace('/', '-')
+                $case = "$round-$mode-$name"
+                Remove-Item Env:NODE_V8_COVERAGE -ErrorAction SilentlyContinue
+                if ($mode -eq 'on') {
+                  $env:NODE_V8_COVERAGE = Join-Path $env:RUNNER_TEMP "coverage-$case"
+                }
+                $timer = [Diagnostics.Stopwatch]::StartNew()
+                $output = & python tools/test.py --shell $binary --mode release -j 1 -p tap $test 2>&1 | Out-String
+                $testExit = $LASTEXITCODE
+                $timer.Stop()
+                $output | Set-Content "$resultsDir/$case.log"
+                Write-Output "CASE $case exit=$testExit"
+                Write-Output $output
+                if ((Get-FileHash $binary -Algorithm SHA256).Hash -ne $initialHash) {
+                  throw 'The binary changed between test executions'
+                }
+                $seconds = [math]::Round($timer.Elapsed.TotalSeconds, 2)
+                "| $round | $mode | $test | $testExit | $seconds |" >> $env:GITHUB_STEP_SUMMARY
+                $rows += [pscustomobject]@{
+                  round = $round; coverage = $mode; test = $test
+                  exitCode = $testExit; seconds = $seconds; binarySha256 = $initialHash
+                }
+                if ($mode -eq 'on') {
+                  Remove-Item $env:NODE_V8_COVERAGE -Recurse -Force -ErrorAction SilentlyContinue
+                }
+              }
+            }
+          }
+          Remove-Item Env:NODE_V8_COVERAGE -ErrorAction SilentlyContinue
+          $rows | ConvertTo-Json | Set-Content "$resultsDir/results.json"
+          # This diagnostic job records test failures rather than gating on them.
+          exit 0
+      - name: Save comparison logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: windows-coverage-comparison
+          path: ${{ runner.temp }}/coverage-comparison
+          if-no-files-found: warn
