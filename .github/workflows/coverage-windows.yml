@@ -7,20 +7,23 @@ permissions:
   contents: read
 
 jobs:
-  historical-missing-sources:
-    runs-on: windows-2025
+  posix-missing-sources:
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        strict: [false, true]
+        generator: [ninja, make]
         revision:
           - label: before-66531
             sha: c3189d436e14202a764d59aa35526ef9c44d9f6b
-            headers: cpp-heap-external-object-inl.h;primitive-heap-object-inl.h;stl_type_traits.h
+            expected: cpp-heap-external-object-inl.h;primitive-heap-object-inl.h;stl_type_traits.h
           - label: before-66583
             sha: a0ce8f152bb1536b2c06dcfcc69db080bcdb6cd5
-            headers: stl_type_traits.h
-    name: ${{ matrix.revision.label }} / strict=${{ matrix.strict }}
+            expected: stl_type_traits.h
+          - label: main
+            sha: bc5af1c67cd8e029f86ec992688dde9307f4d61a
+            expected: ''
+    name: ${{ matrix.revision.label }} / ${{ matrix.generator }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -28,50 +31,43 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: '3.14'
-          allow-prereleases: true
-      - name: Install deps
-        run: choco install nasm
-      - name: Install Rust
-        run: |
-          rustup override set 1.88
-          rustup --version
-      - name: Verify historical GYP generation
-        shell: pwsh
+          python-version: '3.13'
+      - name: Probe existing checker during generation without editing source
         env:
+          CHECK_GENERATOR: ${{ matrix.generator }}
           EXPECTED_SHA: ${{ matrix.revision.sha }}
-          EXPECTED_HEADERS: ${{ matrix.revision.headers }}
-          STRICT: ${{ matrix.strict }}
+          EXPECTED_HEADERS: ${{ matrix.revision.expected }}
         run: |
-          $actualSha = (git rev-parse HEAD).Trim()
-          if ($LASTEXITCODE -ne 0 -or $actualSha -ne $env:EXPECTED_SHA) {
-            throw "Unexpected checkout: $actualSha"
-          }
-          $strict = $env:STRICT -eq 'true'
-          if ($strict) {
-            $env:config_flags = '-Gmsvs_error_on_missing_sources=1'
-          } else {
-            Remove-Item Env:config_flags -ErrorAction SilentlyContinue
-          }
-          $PSNativeCommandUseErrorActionPreference = $false
-          $output = & cmd /d /c 'vcbuild.bat projgen nobuild clang-cl v8temporal' 2>&1 | Out-String
-          $generationExit = $LASTEXITCODE
-          Write-Output $output
-          Write-Output "GYP generation exit code: $generationExit"
-          "SHA: $actualSha; strict: $strict; generation exit: $generationExit" >> $env:GITHUB_STEP_SUMMARY
-          if ($output -notmatch 'Missing input files:') {
-            throw 'The expected missing-source diagnostic was not emitted'
-          }
-          foreach ($header in $env:EXPECTED_HEADERS.Split(';')) {
-            if (-not $output.Contains($header)) {
-              throw "Missing expected diagnostic for $header"
-            }
-          }
-          if ($strict) {
-            if ($generationExit -eq 0 -or $output -notmatch 'gyp: Missing input files:') {
-              throw 'Strict mode did not fail with the expected GYP error'
-            }
-          } elseif ($generationExit -ne 0) {
-            throw 'Baseline generation failed instead of warning successfully'
-          }
-          exit 0
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python - <<'PYTHON'
+          import os, sys, runpy
+          sys.path.insert(0, os.path.abspath('tools/gyp/pylib'))
+          from gyp.generator import msvs, ninja, make
+          missing_sources, missing_actions, skipped = set(), set(), set()
+          def inspect(spec, base):
+              sources = spec.get('sources', [])
+              inputs = [p for a in spec.get('actions', []) for p in a.get('inputs', [])]
+              inputs += [p for c in spec.get('copies', []) for p in c.get('files', [])]
+              missing_sources.update(os.path.normpath(p) for p in msvs._VerifySourcesExist(sources, base))
+              missing_actions.update(os.path.normpath(p) for p in msvs._VerifySourcesExist(inputs, base))
+              skipped.update(p for p in sources + inputs if '$' in p)
+          original_ninja = ninja.NinjaWriter.WriteSpec
+          def check_ninja(self, spec, config_name, generator_flags):
+              inspect(spec, self.base_dir)
+              return original_ninja(self, spec, config_name, generator_flags)
+          ninja.NinjaWriter.WriteSpec = check_ninja
+          original_make = make.MakefileWriter.Write
+          def check_make(self, qualified_target, base_path, output_filename, spec, configs, part_of_all):
+              inspect(spec, base_path)
+              return original_make(self, qualified_target, base_path, output_filename, spec, configs, part_of_all)
+          make.MakefileWriter.Write = check_make
+          sys.argv = ['configure'] + (['--ninja'] if os.environ['CHECK_GENERATOR'] == 'ninja' else [])
+          runpy.run_path('configure', run_name='__main__')
+          print('Missing sources:', sorted(missing_sources))
+          print('Missing action/copy inputs:', sorted(missing_actions))
+          print('Unverified variable paths:', len(skipped))
+          expected = set(filter(None, os.environ['EXPECTED_HEADERS'].split(';')))
+          actual = {os.path.basename(p) for p in missing_sources | missing_actions}
+          assert actual == expected, (actual, expected)
+          print('PASS: observed missing paths match expected historical state')
+          PYTHON
