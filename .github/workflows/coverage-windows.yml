@@ -2,108 +2,76 @@ name: Coverage Windows
 
 on:
   workflow_dispatch:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths-ignore:
-      - '**.md'
-      - '**.nix'
-      - eslint.config.mjs
-      - '**/eslint.config_partial.mjs'
-      - android-configure
-      - android-configure.py
-      - android-patches/**
-      - benchmarks/**
-      - doc/**
-      - pyproject.yml
-      - tsconfig.json
-      - test/internet/**
-      - tools/actions/**
-      - tools/bootstrap/**
-      - tools/dep_updaters/**
-      - tools/doc/**
-      - tools/eslint-rules/**
-      - tools/eslint/**
-      - tools/lint-md/**
-      - tools/nix/**
-      - typings/**
-      - .**
-      - '!.github/workflows/coverage-windows.yml'
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - '**.md'
-      - '**.nix'
-      - eslint.config.mjs
-      - '**/eslint.config_partial.mjs'
-      - android-configure
-      - android-configure.py
-      - android-patches/**
-      - benchmarks/**
-      - doc/**
-      - pyproject.yml
-      - tsconfig.json
-      - test/internet/**
-      - tools/actions/**
-      - tools/bootstrap/**
-      - tools/dep_updaters/**
-      - tools/doc/**
-      - tools/eslint-rules/**
-      - tools/eslint/**
-      - tools/lint-md/**
-      - tools/nix/**
-      - typings/**
-      - .**
-      - '!.github/workflows/coverage-windows.yml'
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
-
-env:
-  PYTHON_VERSION: '3.15'
-  FLAKY_TESTS: keep_retrying
-  RUSTC_VERSION: '1.88'
 
 permissions:
   contents: read
 
 jobs:
-  coverage-windows:
-    if: github.event.pull_request.draft == false
+  historical-missing-sources:
     runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        strict: [false, true]
+        revision:
+          - label: before-66531
+            sha: c3189d436e14202a764d59aa35526ef9c44d9f6b
+            headers: cpp-heap-external-object-inl.h;primitive-heap-object-inl.h;stl_type_traits.h
+          - label: before-66583
+            sha: a0ce8f152bb1536b2c06dcfcc69db080bcdb6cd5
+            headers: stl_type_traits.h
+    name: ${{ matrix.revision.label }} / strict=${{ matrix.strict }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          ref: ${{ matrix.revision.sha }}
           persist-credentials: false
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: '3.15'
           allow-prereleases: true
       - name: Install deps
         run: choco install nasm
-      - name: Install Rust ${{ env.RUSTC_VERSION }}
+      - name: Install Rust
         run: |
-          rustup override set "$RUSTC_VERSION"
+          rustup override set 1.88
           rustup --version
-      - name: Build
-        run: ./vcbuild.bat clang-cl v8temporal
+      - name: Verify historical GYP generation
+        shell: pwsh
         env:
-          config_flags: -Gmsvs_error_on_missing_sources=1
-      # TODO(bcoe): investigate tests that fail with coverage enabled
-      # on Windows.
-      - name: Test
-        run: ./vcbuild.bat noprojgen nobuild test-ci-js; node -e 'process.exit(0)'
-        env:
-          NODE_V8_COVERAGE: ./coverage/tmp
-      - name: Report
-        run: npx c8 report
-        env:
-          NODE_OPTIONS: --max-old-space-size=8192
-      - name: Clean tmp
-        run: npx rimraf ./coverage/tmp
-      - name: Upload
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v7.1.1
-        with:
-          directory: ./coverage
+          EXPECTED_SHA: ${{ matrix.revision.sha }}
+          EXPECTED_HEADERS: ${{ matrix.revision.headers }}
+          STRICT: ${{ matrix.strict }}
+        run: |
+          $actualSha = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualSha -ne $env:EXPECTED_SHA) {
+            throw "Unexpected checkout: $actualSha"
+          }
+          $strict = $env:STRICT -eq 'true'
+          if ($strict) {
+            $env:config_flags = '-Gmsvs_error_on_missing_sources=1'
+          } else {
+            Remove-Item Env:config_flags -ErrorAction SilentlyContinue
+          }
+          $PSNativeCommandUseErrorActionPreference = $false
+          $output = & cmd /d /c 'vcbuild.bat projgen nobuild clang-cl v8temporal' 2>&1 | Out-String
+          $generationExit = $LASTEXITCODE
+          Write-Output $output
+          Write-Output "GYP generation exit code: $generationExit"
+          "SHA: $actualSha; strict: $strict; generation exit: $generationExit" >> $env:GITHUB_STEP_SUMMARY
+          if ($output -notmatch 'Missing input files:') {
+            throw 'The expected missing-source diagnostic was not emitted'
+          }
+          foreach ($header in $env:EXPECTED_HEADERS.Split(';')) {
+            if (-not $output.Contains($header)) {
+              throw "Missing expected diagnostic for $header"
+            }
+          }
+          if ($strict) {
+            if ($generationExit -eq 0 -or $output -notmatch 'gyp: Missing input files:') {
+              throw 'Strict mode did not fail with the expected GYP error'
+            }
+          } elseif ($generationExit -ne 0) {
+            throw 'Baseline generation failed instead of warning successfully'
+          }
+          exit 0
