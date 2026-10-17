@@ -18,8 +18,8 @@ jobs:
     timeout-minutes: 360
 
     env:
-      CC: riscv64-linux-gnu-gcc
-      CXX: riscv64-linux-gnu-g++
+      CC: riscv64-linux-gnu-gcc-14
+      CXX: riscv64-linux-gnu-g++-14
       CC_host: clang-19
       CXX_host: clang++-19
 
@@ -28,7 +28,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: inoway46/node
-          ref: build-shared-generation-producers
+          ref: 55f21fa99021d3f4aed7e6472210e220a615bf5c
           persist-credentials: false
 
       - name: Install build dependencies
@@ -37,19 +37,45 @@ jobs:
           sudo apt-get install -y \
             clang-19 \
             ninja-build \
-            gcc-riscv64-linux-gnu \
-            g++-riscv64-linux-gnu \
+            gcc-14-riscv64-linux-gnu \
+            g++-14-riscv64-linux-gnu \
             binutils-riscv64-linux-gnu
+
+      - name: Record toolchain and source
+        run: |
+          set -o pipefail
+          {
+            git rev-parse HEAD
+            "$CC" --version
+            "$CXX" --version
+            "$CC_host" --version
+            "$CXX_host" --version
+            "$CC" -Q --help=target | grep -E 'march=|mabi='
+          } 2>&1 | tee toolchain.log
+
+      - name: Check RVV intrinsic with rv64gc baseline
+        run: |
+          set -o pipefail
+          cat > "$RUNNER_TEMP/rvv-probe.cc" <<'CPP'
+          #include <riscv_vector.h>
+          __attribute__((target("arch=+v"))) unsigned vlen_intrinsic() {
+            return static_cast<unsigned>(__riscv_vlenb() * 8);
+          }
+          CPP
+          "$CXX" -march=rv64gc -mabi=lp64d -std=gnu++20 -Werror=attributes \
+            -c "$RUNNER_TEMP/rvv-probe.cc" -o "$RUNNER_TEMP/rvv-probe.o" \
+            2>&1 | tee rvv-probe.log
 
       - name: Configure RISC-V cross-build
         run: |
+          set -o pipefail
           ./configure \
             --dest-cpu=riscv64 \
             --dest-os=linux \
             --cross-compiling \
             --ninja \
             --v8-disable-temporal-support \
-            --prefix=/usr
+            --prefix=/usr 2>&1 | tee configure.log
 
       - name: Build Node.js (4 parallel jobs)
         run: |
@@ -61,12 +87,19 @@ jobs:
         run: |
           file out/Release/node
           readelf -h out/Release/node
+          readelf -A out/Release/node
+          test "$(readelf -h out/Release/node | awk '/Machine:/ {print $2}')" = RISC-V
 
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: riscv64-cross-build-log
-          path: build.log
+          path: |
+            build.log
+            configure.log
+            toolchain.log
+            rvv-probe.log
+            config.gypi
           if-no-files-found: ignore
           retention-days: 7
