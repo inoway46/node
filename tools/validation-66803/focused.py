@@ -6,6 +6,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import tempfile
 
 HERE = Path(__file__).resolve().parent
 SOURCE = HERE.parents[1]
@@ -67,6 +68,45 @@ def validate_graph():
     STATUS['producer_ownership_and_dependencies'] = 'passed'
 
 
+
+def snapshot_generated(root):
+    return {str(p.relative_to(root)): {'mtime_ns': p.stat().st_mtime_ns, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
+            for p in root.rglob('*') if p.is_file() and p.suffix != '.d'}
+
+
+def check_make_control():
+    # Prove this behavior also exists in the unchanged Make generator.
+    name = 'tools/gyp/pylib/gyp/generator/make.py'
+    baseline = subprocess.check_output(['git', 'show', PR_SHA + '^:' + name], cwd=SOURCE)
+    assert baseline == (TREE / name).read_bytes()
+    with tempfile.TemporaryDirectory(prefix='make-multi-output-') as temp:
+        root = Path(temp).resolve()
+        writer = (
+            'from pathlib import Path\n'
+            'import sys\n'
+            "p=Path('calls');p.write_text(str(int(p.read_text())+1) if p.exists() else '1')\n"
+            'for name in sys.argv[1:]:\n'
+            " p=Path(name);p.parent.mkdir(exist_ok=True);p.write_text('unchanged\\n')\n"
+        )
+        (root / 'writer.py').write_text(writer)
+        fixture = {'targets': [{'target_name': 'shared', 'type': 'none', 'actions': [{'action_name': 'two_outputs',
+                   'inputs': ['writer.py'], 'outputs': ['gen/a.h', 'gen/b.h'],
+                   'action': [sys.executable, 'writer.py', '<@(_outputs)']}]}]}
+        (root / 'fixture.gyp').write_text(repr(fixture))
+        run([sys.executable, str(TREE / 'tools/gyp/gyp_main.py'), '-f', 'make', '--depth=' + str(root),
+             '--generator-output=' + str(root / 'out'), str(root / 'fixture.gyp')], 'make-control-generate', cwd=root)
+        snapshots = []
+        for index in [1, 2]:
+            run(['make', '-C', str(root / 'out'), 'V=1', 'shared'], 'make-control-' + str(index), cwd=root)
+            snapshots.append(snapshot_generated(root / 'gen'))
+        assert (root / 'calls').read_text() == '2'
+        assert {k: v['sha256'] for k, v in snapshots[0].items()} == {k: v['sha256'] for k, v in snapshots[1].items()}
+        result = {'make_generator_identical_to_pr_parent': True, 'action_invocations': 2,
+                  'before': snapshots[0], 'after': snapshots[1]}
+        (RESULTS / 'make-control.json').write_text(json.dumps(result, indent=2))
+        STATUS['make_multi_output_control'] = 'reexecution also occurs without changes to the generator'
+
+
 def compile_consumer(toolset):
     if GENERATOR == 'ninja':
         prefix = 'obj.host' if toolset == 'host' else 'obj'
@@ -118,11 +158,19 @@ run([*PREFIX, '-n', 'node'], 'node-dry-run')
 if not GRAPH_ONLY:
     run([*PREFIX, *PRODUCERS], 'generators-build')
     generated = OUT / ('Release/gen' if GENERATOR == 'ninja' else 'Release/obj/gen')
-    paths = [p for p in generated.rglob('*') if p.is_file() and '.d' != p.suffix]
-    before = {str(p): (p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest()) for p in paths}
+    before = snapshot_generated(generated)
     run([*PREFIX, *PRODUCERS], 'generators-incremental')
-    assert before == {str(p): (p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest()) for p in paths}
-    STATUS['generated_files_unchanged_on_rebuild'] = True
+    after = snapshot_generated(generated)
+    changes = {name: {'before': before.get(name), 'after': after.get(name)}
+               for name in sorted(before.keys() | after.keys()) if before.get(name) != after.get(name)}
+    (RESULTS / 'generated-file-changes.json').write_text(json.dumps(changes, indent=2))
+    assert {k: v['sha256'] for k, v in before.items()} == {k: v['sha256'] for k, v in after.items()}
+    STATUS['generated_contents_identical_on_rebuild'] = True
+    STATUS['generated_mtimes_identical_on_rebuild'] = not changes
+    if GENERATOR == 'ninja':
+        assert not changes
+    else:
+        check_make_control()
     for toolset in (['host', 'target'] if CPU == 'riscv64' else ['target']):
         compile_consumer(toolset)
     # A small direct generator/compiler probe; graph ownership was checked separately.

@@ -1,11 +1,5 @@
 name: Validate 66804 shared generators and consumer objects
 on:
-  push:
-    branches: [validate-66803-rust-20261017]
-    paths:
-      - .github/workflows/validate-66803-focused.yml
-      - tools/validation-66803/focused.py
-      - tools/validation-66803/capture.py
   workflow_dispatch:
 permissions:
   contents: read
