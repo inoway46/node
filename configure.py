@@ -1900,6 +1900,43 @@ def configure_node_cctest_sources(o):
     SearchFiles('test/cctest', 'cc') + \
     SearchFiles('test/cctest', 'h')
 
+def configure_rust(o):
+  target_arch = o['variables']['target_arch']
+  # Preserve the existing native and Windows Cargo targets.
+  rust_target = ''
+  if flavor == 'win':
+    rust_target = 'aarch64-pc-windows-msvc' if target_arch == 'arm64' else 'x86_64-pc-windows-msvc'
+  if flavor == 'mac' and target_arch == 'x64':
+    rust_target = 'x86_64-apple-darwin'
+  o['variables']['cargo_rust_target'] = rust_target
+  o['variables']['cargo_cross_compiling'] = 0
+  if (flavor == 'win' or not o['variables']['want_separate_host_toolset'] or
+      options.v8_disable_temporal_support or options.shared_temporal_capi):
+    return
+
+  # Only bundled Temporal cross builds need explicit per-toolset Rust targets.
+  rust_target = os.environ.get('CARGO_BUILD_TARGET', '') or rust_target
+  if not rust_target:
+    error('Cross compilation with bundled Temporal requires CARGO_BUILD_TARGET')
+  rust_host_target = ''
+  rustc = os.environ.get('RUSTC', 'rustc')
+  try:
+    version = subprocess.check_output(shlex.split(rustc) + ['-vV'],
+                                      stderr=subprocess.PIPE, text=True)
+  except (OSError, subprocess.CalledProcessError):
+    version = ''
+  match = re.search(r'^host: (\S+)$', version, re.MULTILINE)
+  if match:
+    rust_host_target = match.group(1)
+  if not rust_host_target:
+    error('Cannot determine the Rust host triple from rustc -vV')
+  for triple in (rust_host_target, rust_target):
+    if not re.fullmatch(r'[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)+', triple):
+      error('Rust targets must be target triples, not paths to target JSON files')
+  o['variables']['cargo_cross_compiling'] = 1
+  o['variables']['cargo_rust_target_target'] = rust_target
+  o['variables']['cargo_rust_target_host'] = rust_host_target
+
 def configure_node(o):
   if options.dest_os == 'android':
     o['variables']['OS'] = 'android'
@@ -1934,18 +1971,6 @@ def configure_node(o):
   o['variables']['target_arch'] = target_arch
   o['variables']['node_byteorder'] = sys.byteorder
 
-  # On Windows, cargo may default to the GNU target (e.g. x86_64-pc-windows-gnu)
-  # but Node.js requires MSVC-compatible libraries. Set explicit Rust target
-  # triple for the target architecture.
-  o['variables']['cargo_rust_target'] = ''
-  if flavor == 'win':
-    o['variables']['cargo_rust_target'] = \
-      'aarch64-pc-windows-msvc' if target_arch == 'arm64' else 'x86_64-pc-windows-msvc'
-  # Always set the Rust target for x64 macOS in case we will be building
-  # under Rosetta 2.
-  if flavor == 'mac' and target_arch == 'x64':
-    o['variables']['cargo_rust_target'] = 'x86_64-apple-darwin'
-
   # Allow overriding the compiler - needed by embedders.
   if options.use_clang:
     o['variables']['clang'] = 1
@@ -1957,6 +1982,7 @@ def configure_node(o):
     os.environ['GYP_CROSSCOMPILE'] = "1"
 
   o['variables']['want_separate_host_toolset'] = int(cross_compiling)
+  configure_rust(o)
 
   if target_arch == 'arm64':
     o['variables']['arm_fpu'] = options.arm_fpu or 'neon'
