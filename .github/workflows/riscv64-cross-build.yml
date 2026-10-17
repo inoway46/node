@@ -43,6 +43,9 @@ jobs:
           ref: 55f21fa99021d3f4aed7e6472210e220a615bf5c
           persist-credentials: false
 
+      - name: Trust checked-out workspace in container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Install Rust and RISC-V standard library
         run: |
           set -o pipefail
