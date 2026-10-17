@@ -1,0 +1,72 @@
+name: RISC-V cross-build validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - validation/riscv64-cross-build
+    paths:
+      - .github/workflows/riscv64-cross-build.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.repository == 'inoway46/node'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    env:
+      CC: riscv64-linux-gnu-gcc
+      CXX: riscv64-linux-gnu-g++
+      CC_host: clang-19
+      CXX_host: clang++-19
+
+    steps:
+      - name: Checkout PR #66804
+        uses: actions/checkout@v4
+        with:
+          repository: inoway46/node
+          ref: build-shared-generation-producers
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang-19 \
+            ninja-build \
+            gcc-riscv64-linux-gnu \
+            g++-riscv64-linux-gnu \
+            binutils-riscv64-linux-gnu
+
+      - name: Configure RISC-V cross-build
+        run: |
+          ./configure \
+            --dest-cpu=riscv64 \
+            --dest-os=linux \
+            --cross-compiling \
+            --ninja \
+            --v8-disable-temporal-support \
+            --prefix=/usr
+
+      - name: Build Node.js (single-threaded)
+        run: |
+          set -o pipefail
+          ninja -C out/Release -j1 -v node 2>&1 | tee build.log
+
+      - name: Inspect output
+        if: success()
+        run: |
+          file out/Release/node
+          readelf -h out/Release/node
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: riscv64-cross-build-log
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 7
