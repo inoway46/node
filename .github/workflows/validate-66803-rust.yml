@@ -1,0 +1,64 @@
+name: Validate 66803 Rust native then RISC-V
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        generator: [make, ninja]
+        profile: [Release, Debug]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-19 ninja-build
+          rustup default 1.88.0
+      - name: Native before and after, actual generated Cargo action and FFI link
+        env:
+          GENERATOR: ${{ matrix.generator }}
+          PROFILE: ${{ matrix.profile }}
+        run: python3 tools/validation-66803/run.py native "$GENERATOR" "$PROFILE"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: native-${{ matrix.generator }}-${{ matrix.profile }}
+          path: results/
+  cross:
+    needs: native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        generator: [make, ninja]
+        profile: [Release, Debug]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-19 ninja-build gcc-riscv64-linux-gnu g++-riscv64-linux-gnu binutils-riscv64-linux-gnu qemu-user
+          rustup default 1.88.0
+          rustup target add riscv64gc-unknown-linux-gnu
+      - name: Cross actual Cargo actions, host and RISC-V links and execution
+        env:
+          GENERATOR: ${{ matrix.generator }}
+          PROFILE: ${{ matrix.profile }}
+        run: python3 tools/validation-66803/run.py cross "$GENERATOR" "$PROFILE"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: cross-${{ matrix.generator }}-${{ matrix.profile }}
+          path: results/
