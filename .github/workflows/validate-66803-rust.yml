@@ -1,5 +1,7 @@
 name: Validate 66803 Rust native then RISC-V
 on:
+  push:
+    branches: [validate-66803-rust-20261017]
   workflow_dispatch:
 permissions:
   contents: read
