@@ -1,0 +1,70 @@
+name: Validate 66803 full Node and cross mksnapshot links
+on:
+  push:
+    branches: [validate-66803-rust-20261017]
+    paths:
+      - .github/workflows/validate-66803-full.yml
+      - tools/validation-66803/full.py
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        generator: [make, ninja]
+        phase: [before, after]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch fixed source revision
+        run: git fetch --depth=1 origin 3ba72b0b9c70d44f35ebd19401431e2f80aa6c62
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-19 ninja-build
+          rustup default 1.88.0
+      - name: Build and run actual Node
+        env:
+          GENERATOR: ${{ matrix.generator }}
+          PHASE: ${{ matrix.phase }}
+        run: python3 tools/validation-66803/full.py native "$GENERATOR" "$PHASE"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: full-native-${{ matrix.generator }}-${{ matrix.phase }}
+          path: full-results/
+  cross:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        generator: [make, ninja]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch fixed source revision
+        run: git fetch --depth=1 origin 3ba72b0b9c70d44f35ebd19401431e2f80aa6c62
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-19 ninja-build gcc-riscv64-linux-gnu g++-riscv64-linux-gnu binutils-riscv64-linux-gnu qemu-user
+          rustup default 1.88.0
+          rustup target add riscv64gc-unknown-linux-gnu
+      - name: Build actual host mksnapshot and target Node
+        env:
+          GENERATOR: ${{ matrix.generator }}
+        run: python3 tools/validation-66803/full.py cross "$GENERATOR" after
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: full-cross-${{ matrix.generator }}-after
+          path: full-results/

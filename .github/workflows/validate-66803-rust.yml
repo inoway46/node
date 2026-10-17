@@ -2,6 +2,9 @@ name: Validate 66803 Rust native then RISC-V
 on:
   push:
     branches: [validate-66803-rust-20261017]
+    paths:
+      - tools/validation-66803/run.py
+      - tools/validation-66803/*.patch.b64
   workflow_dispatch:
 permissions:
   contents: read
