@@ -59,8 +59,7 @@ int main(void) {
 
 def build(phase):
     tree = Path(os.environ['RUNNER_TEMP']) / ('node-' + phase)
-    run(['git', 'clone', '--shared', '--no-checkout', str(SOURCE), str(tree)], SOURCE, phase + '-clone')
-    run(['git', 'checkout', '--detach', BASE], tree, phase + '-checkout')
+    run(['git', 'worktree', 'add', '--detach', str(tree), BASE], SOURCE, phase + '-checkout')
     patch = tree / 'shared.patch'
     patch.write_bytes(base64.b64decode((HERE / 'single-producer.patch.b64').read_bytes()))
     run(['git', 'apply', str(patch)], tree, phase + '-shared-patch')
@@ -101,7 +100,7 @@ def build(phase):
         probe(tree, archive, machine, phase + '-' + toolset)
     (RESULTS / (phase + '-success.json')).write_text(json.dumps({'phase': phase, 'stage': STAGE,
                                                                'generator': GENERATOR, 'profile': PROFILE, 'archives': targets}, indent=2))
-    shutil.rmtree(tree)
+    run(['git', 'worktree', 'remove', '--force', str(tree)], SOURCE, phase + '-cleanup')
 
 
 for tool in [['rustc', '-vV'], ['cargo', '-V'], ['clang-19', '--version']]:
