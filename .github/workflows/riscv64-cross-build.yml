@@ -1,0 +1,138 @@
+name: RISC-V issue 66803 full build and install
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.repository == 'inoway46/node'
+    runs-on: ubuntu-24.04
+    container: ubuntu:26.04
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      CC: ccache riscv64-linux-gnu-gcc-15
+      CXX: ccache riscv64-linux-gnu-g++-15
+      CC_host: ccache clang-22
+      CXX_host: ccache clang++-22
+      CARGO: /root/.cargo/bin/cargo
+      RUSTC: /root/.cargo/bin/rustc
+      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc-15
+
+    steps:
+      - name: Install distribution toolchain
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential python3 ccache ninja-build \
+            clang-22 gcc-15-riscv64-linux-gnu g++-15-riscv64-linux-gnu \
+            binutils-riscv64-linux-gnu file xz-utils
+
+      - name: Checkout exact PR 66804 head
+        uses: actions/checkout@v4
+        with:
+          repository: inoway46/node
+          ref: 55f21fa99021d3f4aed7e6472210e220a615bf5c
+          persist-credentials: false
+
+      - name: Install Rust and RISC-V standard library
+        run: |
+          set -o pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+          sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable \
+            2>&1 | tee rust-setup.log
+          /root/.cargo/bin/rustup target add riscv64gc-unknown-linux-gnu \
+            2>&1 | tee -a rust-setup.log
+          echo /root/.cargo/bin >> "$GITHUB_PATH"
+
+      - name: Record environment and toolchain
+        run: |
+          set -o pipefail
+          {
+            cat /etc/os-release
+            uname -a
+            nproc
+            free -h
+            git rev-parse HEAD
+            python3 --version
+            clang-22 --version
+            riscv64-linux-gnu-gcc-15 --version
+            riscv64-linux-gnu-g++-15 --version
+            riscv64-linux-gnu-gcc-15 -dumpmachine
+            riscv64-linux-gnu-gcc-15 -Q --help=target | grep -E 'march=|mabi='
+            ninja --version
+            ccache --version
+            "$RUSTC" -Vv
+            "$CARGO" -Vv
+            /root/.cargo/bin/rustup target list --installed
+            "$RUSTC" --print target-list | grep riscv64gc-unknown-linux-gnu
+            "$RUSTC" --print target-libdir --target riscv64gc-unknown-linux-gnu
+          } 2>&1 | tee toolchain.log
+
+      - name: Configure with default Temporal detection
+        run: |
+          set -o pipefail
+          ./configure --dest-cpu=riscv64 --dest-os=linux \
+            --prefix=/usr --cross-compiling --ninja 2>&1 | tee configure.log
+
+      - name: Record detected Temporal and Rust configuration
+        if: always()
+        run: |
+          python3 - <<'PY' 2>&1 | tee temporal-config.log
+          import ast
+          from pathlib import Path
+          p = Path('config.gypi')
+          if not p.exists():
+              print('config.gypi absent: configure did not complete; Temporal status unconfirmed')
+          else:
+              v = ast.literal_eval(p.read_text())['variables']
+              for k in ('host_arch', 'target_arch', 'v8_enable_temporal_support',
+                        'cargo_rust_target', 'node_shared_temporal_capi'):
+                  print(f'{k}={v.get(k, "<unset>")}')
+          PY
+          if test -d out/Release; then
+            grep -R -n -E 'cargo rustc|cargo_build|libnode_crates' \
+              out/Release --include='*.ninja' > rust-build-rules.log || true
+          fi
+
+      - name: Full build and staged install using Ninja
+        run: |
+          set -o pipefail
+          # Limit Ninja as well as Make to four jobs on the hosted runner.
+          make CC="$CC" CXX="$CXX" CC_host="$CC_host" CXX_host="$CXX_host" \
+            DESTDIR="$PWD/target" PREFIX=/usr JOBS=4 V=1 install -j4 \
+            2>&1 | tee build-install.log
+
+      - name: Verify binary and installation
+        run: |
+          set -o pipefail
+          {
+            file out/Release/node target/usr/bin/node
+            readelf -h target/usr/bin/node
+            readelf -A target/usr/bin/node
+            test "$(readelf -h target/usr/bin/node | awk '/Machine:/ {print $2}')" = RISC-V
+            cmp out/Release/node target/usr/bin/node
+            test -f target/usr/include/node/node.h
+            test -f target/usr/lib/node_modules/npm/package.json
+            test -L target/usr/bin/npm
+            test -L target/usr/bin/npx
+            find target -type f -o -type l | sort
+          } 2>&1 | tee install-verification.log
+
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: riscv64-issue66803-full-build-logs
+          path: |
+            *.log
+            config.gypi
+            config.mk
+          if-no-files-found: warn
+          retention-days: 7
