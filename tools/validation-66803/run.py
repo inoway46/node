@@ -90,7 +90,7 @@ def build(phase):
     else:
         archives = [(gen / PROFILE.lower() / 'libnode_crates.a', 'Advanced Micro Devices X86-64', 'native')]
     out = root if GENERATOR == 'ninja' else tree / 'out'
-    targets = [str(a.relative_to(out)) for a, _, _ in archives]
+    targets = [str(a.relative_to(out)) for a, _, _ in archives] if GENERATOR == 'ninja' else ['node_crates']
     command = (['ninja', '-C', str(out), '-j2', '-v'] if GENERATOR == 'ninja' else
                ['make', '-C', str(out), '-j2', 'BUILDTYPE=' + PROFILE, 'V=1']) + targets
     run(command, tree, phase + '-cargo')
