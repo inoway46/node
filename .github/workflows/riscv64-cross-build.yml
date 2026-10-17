@@ -51,10 +51,10 @@ jobs:
             --v8-disable-temporal-support \
             --prefix=/usr
 
-      - name: Build Node.js (single-threaded)
+      - name: Build Node.js (4 parallel jobs)
         run: |
           set -o pipefail
-          ninja -C out/Release -j1 -v node 2>&1 | tee build.log
+          ninja -C out/Release -j4 -v node 2>&1 | tee build.log
 
       - name: Inspect output
         if: success()
