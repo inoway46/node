@@ -1,0 +1,38 @@
+name: Validate 66803 shared producers only, RISC-V without Temporal
+on:
+  push:
+    branches: [validate-66803-rust-20261017]
+    paths:
+      - .github/workflows/validate-66803-shared-only.yml
+      - tools/validation-66803/shared_only.py
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  cross:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        generator: [make, ninja]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch fixed source revision
+        run: git fetch --depth=1 origin 3ba72b0b9c70d44f35ebd19401431e2f80aa6c62
+      - name: Install C and C++ cross tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-19 ninja-build gcc-riscv64-linux-gnu g++-riscv64-linux-gnu binutils-riscv64-linux-gnu qemu-user
+      - name: Build mksnapshot and Node with only the shared-producer patch
+        env:
+          GENERATOR: ${{ matrix.generator }}
+        run: python3 tools/validation-66803/shared_only.py "$GENERATOR"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: shared-only-cross-${{ matrix.generator }}
+          path: shared-only-results/
