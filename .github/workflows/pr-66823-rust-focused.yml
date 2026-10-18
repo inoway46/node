@@ -1,0 +1,35 @@
+name: PR 66823 focused Rust cross validation
+on:
+  push:
+    branches: [validation/pr-66823-rust-focused]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        generator: [make, ninja]
+        profile: [Release, Debug]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Fetch exact PR source
+        run: git fetch --depth=1 origin 19c93459614359c7d94ab65b807606e40ffce71b
+      - name: Install rv64gc toolchain and sysroot
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-19 ninja-build gcc-14-riscv64-linux-gnu g++-14-riscv64-linux-gnu binutils-riscv64-linux-gnu qemu-user
+          rustup default 1.99.1
+          rustup target add riscv64gc-unknown-linux-gnu
+      - name: Build generated Cargo targets and execute Temporal FFI probes
+        run: python3 tools/validation-66823/run.py '${{ matrix.generator }}' '${{ matrix.profile }}'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: focused-${{ matrix.generator }}-${{ matrix.profile }}
+          path: results/
