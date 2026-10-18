@@ -1,0 +1,143 @@
+diff --git a/BUILDING.md b/BUILDING.md
+index 8c7407b9627..b2256169b6a 100644
+--- a/BUILDING.md
++++ b/BUILDING.md
+@@ -1067,6 +1067,19 @@ a warning is printed and Temporal support is disabled.
+
+ Passing both options to `configure.py` is an error.
+
++For non-Windows cross builds with bundled Temporal, set the Rust target when
++configuring:
++
++```bash
++CARGO_BUILD_TARGET=riscv64gc-unknown-linux-gnu ./configure \
++  --cross-compiling --dest-os=linux --dest-cpu=riscv64
++```
++
++Configure saves this target and the host triple reported by `rustc -vV`.
++Install the target's Rust standard library and configure the cross linker
++separately. Re-run configure when changing targets. Cargo configuration-file
++targets and custom JSON targets are not supported by this detection.
++
+ ## Building Node.js with external core modules
+
+ It is possible to specify one or more JavaScript text files to be bundled in
+diff --git a/configure.py b/configure.py
+index fb742692f53..390600e6ea4 100755
+--- a/configure.py
++++ b/configure.py
+@@ -1957,6 +1957,31 @@ def configure_node(o):
+     os.environ['GYP_CROSSCOMPILE'] = "1"
+
+   o['variables']['want_separate_host_toolset'] = int(cross_compiling)
++  o['variables']['cargo_cross_compiling'] = 0
++  if (flavor != 'win' and cross_compiling and
++      not options.v8_disable_temporal_support and not options.shared_temporal_capi):
++    # Only bundled Temporal cross builds need explicit per-toolset Rust targets.
++    rust_target = os.environ.get('CARGO_BUILD_TARGET', '') or o['variables']['cargo_rust_target']
++    if not rust_target:
++      error('Cross compilation with bundled Temporal requires CARGO_BUILD_TARGET')
++    rust_host_target = ''
++    rustc = os.environ.get('RUSTC', 'rustc')
++    try:
++      version = subprocess.check_output(shlex.split(rustc) + ['-vV'],
++                                        stderr=subprocess.PIPE, text=True)
++    except (OSError, subprocess.CalledProcessError):
++      version = ''
++    match = re.search(r'^host: (\S+)$', version, re.MULTILINE)
++    if match:
++      rust_host_target = match.group(1)
++    if not rust_host_target:
++      error('Cannot determine the Rust host triple from rustc -vV')
++    for triple in (rust_host_target, rust_target):
++      if not re.fullmatch(r'[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)+', triple):
++        error('Rust targets must be target triples, not paths to target JSON files')
++    o['variables']['cargo_cross_compiling'] = 1
++    o['variables']['cargo_rust_target_target'] = rust_target
++    o['variables']['cargo_rust_target_host'] = rust_host_target
+
+   if target_arch == 'arm64':
+     o['variables']['arm_fpu'] = options.arm_fpu or 'neon'
+diff --git a/deps/crates/crates.gyp b/deps/crates/crates.gyp
+index 702e661f4d3..53078091c2e 100644
+--- a/deps/crates/crates.gyp
++++ b/deps/crates/crates.gyp
+@@ -6,14 +6,19 @@
+     'zoneinfo64_dir': 'zoneinfo64-v0_3',
+     'temporal_zoneinfo64_data_output': '<(SHARED_INTERMEDIATE_DIR)/src/builtins/builtins-temporal-zoneinfo64-data.cc',
+     'cargo_rust_target%': '',
++    'cargo_cross_compiling%': 0,
++    'cargo_rust_target_host%': '',
++    'cargo_rust_target_target%': '',
++    'node_shared_temporal_capi%': 'false',
+   },
+   'conditions': [
+     ['build_type == "Release"', {
+       'variables': {
+         'cargo_build_flags': ['--release'],
++        'cargo_profile': 'release',
+       },
+       'conditions': [
+-        ['cargo_rust_target!=""', {
++        ['cargo_rust_target!="" and cargo_cross_compiling==0', {
+           'variables': {
+             'cargo_build_flags': ['--target', '<(cargo_rust_target)'],
+           }
+@@ -31,6 +36,7 @@
+     }, {
+       'variables': {
+         'cargo_build_flags': [],
++        'cargo_profile': 'debug',
+       },
+       'conditions': [
+         ['OS=="win"', {
+@@ -50,6 +56,17 @@
+       'target_name': 'node_crates',
+       'type': 'none',
+       'toolsets': ['host', 'target'],
++      'variables': {
++        'cargo_output_dir': '<(SHARED_INTERMEDIATE_DIR)',
++        'cargo_cross_target_flags': [],
++        'conditions': [
++          ['cargo_cross_compiling==1', {
++            'cargo_output_dir': '<(SHARED_INTERMEDIATE_DIR)/cargo/<(_toolset)',
++            'cargo_cross_target_flags': ['--target', '<(cargo_rust_target_<(_toolset))'],
++            'node_crates_libpath': '<(SHARED_INTERMEDIATE_DIR)/cargo/<(_toolset)/<(cargo_rust_target_<(_toolset))/<(cargo_profile)/<(STATIC_LIB_PREFIX)node_crates<(STATIC_LIB_SUFFIX)',
++          }],
++        ],
++      },
+       'hard_dependency': 1,
+       'sources': [
+         'Cargo.toml',
+@@ -70,7 +87,7 @@
+         ],
+       },
+       'conditions': [
+-        ['OS=="win"', {
++        ['OS=="win" and node_shared_temporal_capi=="false"', {
+           'actions': [
+             {
+               'action_name': 'cargo_build',
+@@ -90,7 +107,8 @@
+               ],
+             }
+           ],
+-        }, {
++        }],
++        ['OS!="win" and node_shared_temporal_capi=="false"', {
+           'actions': [
+             {
+               'action_name': 'cargo_build',
+@@ -103,10 +121,11 @@
+               'action': [
+                 '<(cargo)',
+                 'rustc',
++                '<@(cargo_cross_target_flags)',
+                 '<@(cargo_build_flags)',
+                 '--frozen',
+                 '--target-dir',
+-                '<(SHARED_INTERMEDIATE_DIR)'
++                '<(cargo_output_dir)'
+               ],
+             }
+           ],

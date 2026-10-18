@@ -1,0 +1,67 @@
+diff --git a/deps/v8/src/heap/mutable-page.cc b/deps/v8/src/heap/mutable-page.cc
+index a63309718da..ef9dbc92dde 100644
+--- a/deps/v8/src/heap/mutable-page.cc
++++ b/deps/v8/src/heap/mutable-page.cc
+@@ -49,9 +49,7 @@ MutablePage::MutablePage(Heap* heap, BaseSpace* space, size_t chunk_size,
+   // This assert is merely necessary but not sufficient to guarantee that the
+   // fields sit on the same cacheline as the metadata object itself is
+   // dynamically allocated without alignment restrictions.
+-  static_assert(
+-      kOffsetOfFirstFastField / std::hardware_destructive_interference_size ==
+-      kOffsetOfLastFastField / std::hardware_destructive_interference_size);
++  static_assert(kOffsetOfFirstFastField / 64 == kOffsetOfLastFastField / 64);
+ }
+
+ // static
+diff --git a/deps/v8/src/json/json-parser.cc b/deps/v8/src/json/json-parser.cc
+index 9fb474514c5..3a7aab3387b 100644
+--- a/deps/v8/src/json/json-parser.cc
++++ b/deps/v8/src/json/json-parser.cc
+@@ -2103,7 +2103,7 @@ JsonString JsonParser<Char>::ScanJsonString(bool needs_internalization) {
+
+   // SIMD constants for one-byte string scanning, hoisted out of the loop.
+   // Only used in the sizeof(Char)==1 path; dead-store-eliminated for two-byte.
+-  [[maybe_unused]] hw::FixedTag<uint8_t, 16> tag;
++  [[maybe_unused]] hw::CappedTag<uint8_t, 16> tag;
+   [[maybe_unused]] const size_t stride = hw::Lanes(tag);
+   [[maybe_unused]] const auto mask_0x20 = hw::Set(tag, 0x20);
+   [[maybe_unused]] const auto mask_quote = hw::Set(tag, '"');
+diff --git a/deps/v8/src/json/json-stringifier.cc b/deps/v8/src/json/json-stringifier.cc
+index c7f692aed1f..9466b8d3084 100644
+--- a/deps/v8/src/json/json-stringifier.cc
++++ b/deps/v8/src/json/json-stringifier.cc
+@@ -3411,7 +3411,7 @@ bool FastJsonStringifier<Char>::AppendStringSIMD(
+   size_t uncopied_src_index = 0;  // Index of first char not copied yet.
+   const SrcChar* block = chars;
+   const SrcChar* end = chars + length;
+-  hw::FixedTag<SrcChar, 16> tag;
++  hw::CappedTag<SrcChar, 16> tag;
+   static const size_t stride = hw::Lanes(tag);
+
+   const auto mask_0x20 = hw::Set(tag, 0x20);
+diff --git a/deps/v8/src/objects/string.cc b/deps/v8/src/objects/string.cc
+index 429cf2d2134..24429a1c347 100644
+--- a/deps/v8/src/objects/string.cc
++++ b/deps/v8/src/objects/string.cc
+@@ -1186,7 +1186,7 @@ static void CalculateLineEndsImpl(String::LineEndsVector* line_ends,
+     }
+
+     const uint8_t* data = src.begin();
+-    hw::FixedTag<uint8_t, 16> tag;
++    hw::CappedTag<uint8_t, 16> tag;
+     const size_t stride = hw::Lanes(tag);
+     const auto v_lf = hw::Set(tag, 0x0A);
+     const auto v_cr = hw::Set(tag, 0x0D);
+diff --git a/deps/v8/src/strings/string-hasher.cc b/deps/v8/src/strings/string-hasher.cc
+index bea067c6f03..6708f121980 100644
+--- a/deps/v8/src/strings/string-hasher.cc
++++ b/deps/v8/src/strings/string-hasher.cc
+@@ -77,7 +77,7 @@ uint64_t HashConvertingTo8Bit(const uint16_t* chars, uint32_t length,
+
+ bool IsOnly8BitSIMD(const uint16_t* chars, unsigned len) {
+   namespace hw = hwy::HWY_NAMESPACE;
+-  hw::FixedTag<uint16_t, 8> tag;
++  hw::CappedTag<uint16_t, 8> tag;
+   const size_t stride = hw::Lanes(tag);
+   const auto high_byte_mask = hw::Set(tag, static_cast<uint16_t>(0xFF00));
+   const auto zero = hw::Zero(tag);

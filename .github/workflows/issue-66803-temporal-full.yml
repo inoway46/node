@@ -1,0 +1,81 @@
+name: Issue 66803 Temporal full cross-build
+on:
+  push:
+    branches: [validation/issue-66803-temporal-full]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  full-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    container:
+      image: aosc/aosc-os@sha256:2363d4f69429294993aea01afa4cd57d8806235eb004fd53fa82cc36997520eb
+    defaults:
+      run:
+        shell: bash
+    env:
+      CC: ccache riscv64-linux-gnu-gcc
+      CXX: ccache riscv64-linux-gnu-g++
+      CC_host: ccache clang
+      CXX_host: ccache clang++
+      AR: riscv64-linux-gnu-ar
+      AR_host: ar
+      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
+      CARGO_HOME: /opt/validation-cargo
+      RUSTUP_HOME: /opt/validation-rustup
+      CCACHE_MAXSIZE: 1G
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install original-issue compilers and runtime dependencies
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y git curl make pkg-config ccache python-3 flex qemu-riscv64-static \
+            'gcc+cross-riscv64=15.3.0+glibc2.42+5-1' 'llvm-22=22.1.8-2'
+          echo '/usr/lib/llvm-22/bin' >> "$GITHUB_PATH"
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+          sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain 1.99.1 --no-modify-path
+          /opt/validation-cargo/bin/rustup target add riscv64gc-unknown-linux-gnu
+          echo '/opt/validation-cargo/bin' >> "$GITHUB_PATH"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Fetch pinned original source
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git fetch --depth=1 origin f59539b514344ed0a0945f8790d61121df88a5d4
+      - name: Verify toolchain, sysroot, ar and QEMU
+        run: |
+          mkdir -p audit-temporal
+          { cat /etc/os-release; uname -a; nproc; free -h; df -h; } > audit-temporal/resources.log
+          python3 tools/validation-66803-temporal/prepare.py toolchain
+      - name: Apply pinned fixes and configure Temporal
+        run: python3 tools/validation-66803-temporal/prepare.py prepare
+      - name: Full Make build and staged install
+        timeout-minutes: 330
+        run: |
+          set -euo pipefail
+          test -z "${CARGO_BUILD_TARGET:-}"
+          task_audit="$GITHUB_WORKSPACE/audit-temporal"
+          cd "$(cat "$task_audit/source-path.txt")"
+          trap 'task_exit=$?; echo "$task_exit" > "$task_audit/build-exit-code"' EXIT
+          make CC="$CC" CXX="$CXX" CC_host="$CC_host" CXX_host="$CXX_host" \
+            DESTDIR="$PWD/target" V=1 install -j4 2>&1 | tee "$task_audit/build.log"
+      - name: Audit install and host/target Rust archives
+        if: always()
+        run: python3 tools/validation-66803-temporal/prepare.py diagnostics
+      - name: Run installed Node with non-RVV QEMU
+        timeout-minutes: 10
+        run: python3 tools/validation-66803-temporal/prepare.py smoke
+      - name: Record final resources
+        if: always()
+        run: |
+          mkdir -p audit-temporal
+          { free -h; df -h; ccache -s; } > audit-temporal/final-resources.log
+          dmesg | tail -100 > audit-temporal/dmesg-tail.log 2>&1 || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: issue-66803-temporal-full-build
+          path: audit-temporal/
