@@ -62,6 +62,9 @@ jobs:
           trap 'task_exit=$?; echo "$task_exit" > "$task_audit/build-exit-code"' EXIT
           make CC="$CC" CXX="$CXX" CC_host="$CC_host" CXX_host="$CXX_host" \
             DESTDIR="$PWD/target" V=1 install -j4 2>&1 | tee "$task_audit/build.log"
+      - name: Preserve generated Node and runtime libraries
+        if: always()
+        run: python3 tools/validation-66803-temporal/prepare.py save_binary
       - name: Audit install and host/target Rust archives
         if: always()
         run: python3 tools/validation-66803-temporal/prepare.py diagnostics

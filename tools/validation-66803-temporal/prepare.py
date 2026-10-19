@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import tarfile
 
 ROOT = Path(__file__).resolve().parents[2]
 TOOLS = Path(__file__).resolve().parent
@@ -14,6 +15,7 @@ AUDIT = ROOT / 'audit-temporal'
 SOURCE = Path(os.environ.get('RUNNER_TEMP', '/tmp')) / 'issue-66803-temporal-source'
 BASE = 'f59539b514344ed0a0945f8790d61121df88a5d4'
 QEMU_CPU = 'rv64,v=false,zba=false,zbb=false,zbc=false,zbs=false'
+RUNTIME_LIBRARIES = ['libatomic.so.1', 'libstdc++.so.6', 'libgcc_s.so.1', 'libc.so.6', 'libm.so.6']
 ALLOWED = {'i', 'm', 'a', 'f', 'd', 'c', 'zicsr', 'zifencei', 'zmmul',
            'zaamo', 'zalrsc', 'zca', 'zcd'}
 
@@ -46,6 +48,40 @@ def audit_elf(path, name, machine='RISC-V'):
         assert 'double-float ABI' in headers, path
 
 
+def runtime_options(sysroot):
+    libraries = json.loads((AUDIT / 'runtime-libraries.json').read_text())
+    directories = list(dict.fromkeys(str(Path(path).parent) for path in libraries.values()))
+    return ['-cpu', QEMU_CPU, '-L', sysroot,
+            '-E', 'LD_LIBRARY_PATH=' + ':'.join(directories)]
+
+
+def save_binary():
+    candidates = [SOURCE / 'target/usr/bin/node', SOURCE / 'out/Release/node']
+    node = next((path for path in candidates if path.is_file()), None)
+    if node is None:
+        return
+    libraries = json.loads((AUDIT / 'runtime-libraries.json').read_text())
+    sysroot = (AUDIT / 'sysroot.log').read_text().strip()
+    manifest = {
+        'node_source': str(node), 'sha256': hashlib.sha256(node.read_bytes()).hexdigest(),
+        'runtime_libraries': libraries, 'qemu_cpu': QEMU_CPU,
+        'example_command': 'qemu-riscv64-static -cpu ' + QEMU_CPU +
+                           ' -L runtime -E LD_LIBRARY_PATH="$PWD/runtime/lib"'
+                           ' ./node --harmony-temporal smoke.js',
+    }
+    (AUDIT / 'node-bundle.json').write_text(json.dumps(manifest, indent=2) + '\n')
+    with tarfile.open(AUDIT / 'node-runtime.tar.gz', 'w:gz') as archive:
+        archive.add(node, arcname='node')
+        archive.add(TOOLS / 'smoke.js', arcname='smoke.js')
+        archive.add(AUDIT / 'node-bundle.json', arcname='node-bundle.json')
+        archive.add(AUDIT / 'config.gypi', arcname='config.gypi')
+        for name, path in libraries.items():
+            archive.add(path, arcname='runtime/lib/' + name)
+        archive.add(Path(sysroot) / 'lib/ld-linux-riscv64-lp64d.so.1',
+                    arcname='runtime/lib/ld-linux-riscv64-lp64d.so.1')
+    print('Saved Node, runtime libraries and smoke script before QEMU execution.', flush=True)
+
+
 def toolchain():
     AUDIT.mkdir(exist_ok=True)
     assert '15.3.0' in record(['riscv64-linux-gnu-g++', '-v'], 'gcc-version.log')
@@ -60,10 +96,14 @@ def toolchain():
     assert re.search(r'-mabi=\s+lp64d(?:\s|$)', defaults), defaults
     sysroot = record(['riscv64-linux-gnu-gcc', '-print-sysroot'], 'sysroot.log').strip()
     assert Path(sysroot).is_dir(), sysroot
-    for library in ['libc.so.6', 'libm.so.6', 'libstdc++.so.6', 'libgcc_s.so.1']:
+    libraries = {}
+    for library in RUNTIME_LIBRARIES:
         path = record(['riscv64-linux-gnu-g++', '-print-file-name=' + library],
                       library + '-path.log').strip()
+        path = Path(path).resolve(strict=True)
         audit_elf(path, library)
+        libraries[library] = str(path)
+    (AUDIT / 'runtime-libraries.json').write_text(json.dumps(libraries, indent=2) + '\n')
     audit_elf(Path(sysroot) / 'lib/ld-linux-riscv64-lp64d.so.1', 'loader')
     for tool in ['ar', 'ranlib', 'ld', 'readelf']:
         record(['riscv64-linux-gnu-' + tool, '--version'], tool + '-version.log')
@@ -75,11 +115,13 @@ def toolchain():
             str(AUDIT / 'probe.o')], 'probe-ar.log')
     record(['riscv64-linux-gnu-ranlib', str(AUDIT / 'probe.a')], 'probe-ranlib.log')
     record(['riscv64-linux-gnu-gcc', '-march=rv64gc', '-mabi=lp64d',
-            str(AUDIT / 'main.c'), str(AUDIT / 'probe.a'), '-o', str(AUDIT / 'probe')],
+            str(AUDIT / 'main.c'), str(AUDIT / 'probe.a'),
+            '-Wl,--no-as-needed', '-latomic', '-lstdc++', '-o', str(AUDIT / 'probe')],
            'probe-link.log')
     audit_elf(AUDIT / 'probe', 'probe')
-    record(['qemu-riscv64-static', '-cpu', QEMU_CPU, '-L', sysroot,
-            str(AUDIT / 'probe')], 'probe-qemu.log')
+    record(['riscv64-linux-gnu-readelf', '-d', str(AUDIT / 'probe')], 'probe-dynamic.log')
+    record(['qemu-riscv64-static'] + runtime_options(sysroot) +
+           [str(AUDIT / 'probe')], 'probe-qemu.log')
     print('Toolchain, ar/libfl, sysroot ISA/ABI, and non-RVV QEMU preflight passed.', flush=True)
 
 
@@ -128,7 +170,9 @@ def smoke():
     out_node = SOURCE / 'out/Release/node'
     assert hashlib.sha256(node.read_bytes()).digest() == hashlib.sha256(out_node.read_bytes()).digest()
     sysroot = (AUDIT / 'sysroot.log').read_text().strip()
-    command = ['qemu-riscv64-static', '-cpu', QEMU_CPU, '-L', sysroot, str(node)]
+    record(['riscv64-linux-gnu-readelf', '-d', str(node)], 'installed-node-dynamic.log')
+    command = ['qemu-riscv64-static'] + runtime_options(sysroot) + [str(node)]
+    (AUDIT / 'qemu-command.json').write_text(json.dumps(command, indent=2) + '\n')
     record(command + ['--version'], 'node-version.log')
     result = record(command + ['--harmony-temporal', str(TOOLS / 'smoke.js')],
                     'node-smoke.log', timeout=300)
@@ -163,5 +207,5 @@ def diagnostics():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('phase', choices=['toolchain', 'prepare', 'smoke', 'diagnostics'])
+    parser.add_argument('phase', choices=['toolchain', 'prepare', 'save_binary', 'smoke', 'diagnostics'])
     globals()[parser.parse_args().phase]()
