@@ -1,0 +1,92 @@
+name: Issue 66803 RISC-V JS regression
+
+on:
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: 'Start with small; larger suites may need missing native helpers'
+        type: choice
+        default: small
+        options: [small, parallel, sequential, message, js-suites]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  js-regression:
+    if: github.repository == 'inoway46/node'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      AUDIT: ${{ github.workspace }}/audit-js-regression
+      TEST_SCOPE: ${{ inputs.scope }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Initialize evidence
+        run: |
+          mkdir -p "$AUDIT"
+          echo "BUILD_ARTIFACT=$RUNNER_TEMP/issue-66803-build-artifact" >> "$GITHUB_ENV"
+          echo "TEST_SOURCE=$RUNNER_TEMP/issue-66803-js-source" >> "$GITHUB_ENV"
+          echo "NODE_BUNDLE=$RUNNER_TEMP/issue-66803-node-bundle" >> "$GITHUB_ENV"
+          printf 'setup-incomplete\n' > "$AUDIT/state.txt"
+          git rev-parse HEAD > "$AUDIT/workflow-sha.txt"
+          cp .github/workflows/issue-66803-js-regression.yml "$AUDIT/"
+          cp -r tools/validation-66803-js "$AUDIT/driver"
+      - name: Download exact successful build artifact (no build)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          repository: inoway46/node
+          run-id: '39183959521'
+          artifact-ids: '12165443477'
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          path: ${{ env.BUILD_ARTIFACT }}
+      - name: Restore and verify original source and runtime
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin f59539b514344ed0a0945f8790d61121df88a5d4
+          python3 tools/validation-66803-js/run.py prepare 2>&1 | tee "$AUDIT/prepare.log"
+      - name: Install QEMU and enable RISC-V binfmt
+        run: |
+          set -euo pipefail
+          {
+            sudo apt-get update
+            sudo apt-get install -y qemu-user-static binfmt-support binutils
+            sudo update-binfmts --enable qemu-riscv64
+            cat /proc/sys/fs/binfmt_misc/qemu-riscv64
+          } 2>&1 | tee "$AUDIT/binfmt-setup.log"
+          grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-riscv64
+          grep -q '^flags: .*F' /proc/sys/fs/binfmt_misc/qemu-riscv64
+          {
+            qemu-riscv64-static --version
+            python3 --version
+            uname -a
+            dpkg-query -W qemu-user-static binfmt-support
+          } > "$AUDIT/host-versions.log"
+          echo "QEMU_CPU=rv64,v=false,zba=false,zbb=false,zbc=false,zbs=false" >> "$GITHUB_ENV"
+          echo "QEMU_LD_PREFIX=$NODE_BUNDLE/runtime" >> "$GITHUB_ENV"
+          echo "QEMU_SET_ENV=LD_LIBRARY_PATH=$NODE_BUNDLE/runtime/lib" >> "$GITHUB_ENV"
+      - name: Validate direct ELF, execPath, spawn, fork and workers
+        timeout-minutes: 10
+        run: python3 tools/validation-66803-js/run.py preflight
+      - name: Run selected Node core JS tests
+        timeout-minutes: 150
+        run: python3 tools/validation-66803-js/run.py test
+      - name: Publish evidence summary
+        if: always()
+        run: |
+          python3 tools/validation-66803-js/run.py summarize
+          cat "$AUDIT/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: issue-66803-js-${{ inputs.scope }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.AUDIT }}/
+          if-no-files-found: error
+          retention-days: 30
