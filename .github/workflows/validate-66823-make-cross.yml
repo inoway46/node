@@ -1,0 +1,63 @@
+name: Validate 66823 Make cross builds
+on:
+  push:
+    branches: [validate-66823-make-cross-20261021]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compare:
+    name: Make Release - ${{ matrix.arch }} - before and after
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            triple: aarch64-unknown-linux-gnu
+            compiler: aarch64-linux-gnu
+          - arch: riscv64
+            triple: riscv64gc-unknown-linux-gnu
+            compiler: riscv64-linux-gnu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Fetch and verify fixed source revisions
+        run: |
+          set -euxo pipefail
+          before=697ecce05e7d72cf9278cae15278f51016d6e3b2
+          after=5ff420e05b794b8aac9d0cb07f1867a8f5463487
+          git fetch --no-tags --depth=2 https://github.com/inoway46/node.git "$after"
+          test "$(git rev-parse "$after^")" = "$before"
+          mkdir -p sources results
+          git diff --name-only "$before" "$after" > results/changed-files.txt
+          printf '%s\n' BUILDING.md configure.py deps/crates/crates.gyp > results/expected-files.txt
+          diff -u results/expected-files.txt results/changed-files.txt
+          git diff "$before" "$after" > results/rust-only.patch
+          git show -s --format=fuller "$before" "$after" > results/revisions.txt
+          git archive "$before" -o sources/before.tar
+          git archive "$after" -o sources/after.tar
+      - name: Install cross compiler and Rust target
+        env:
+          CROSS_COMPILER: ${{ matrix.compiler }}
+          RUST_TARGET: ${{ matrix.triple }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "gcc-$CROSS_COMPILER" "g++-$CROSS_COMPILER" qemu-user
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup target add --toolchain 1.88.0 "$RUST_TARGET"
+      - name: Compare Make archives and Temporal FFI
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          python3 tools/validation-66823-make/run.py \
+            --arch "$TARGET_ARCH" --sources sources \
+            --work "$RUNNER_TEMP/66823-$TARGET_ARCH" --output results
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: make-release-${{ matrix.arch }}
+          path: results/
+          retention-days: 14
