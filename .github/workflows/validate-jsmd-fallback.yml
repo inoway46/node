@@ -1,0 +1,230 @@
+name: Validate cache runner fallback
+on:
+  push:
+    branches:
+      - validate-jsmd-cache-fallback
+    paths:
+      - .github/workflows/validate-jsmd-fallback.yml
+      - .github/actions/lint-js-and-md/action.yml
+permissions:
+  contents: read
+env:
+  NODE_VERSION: 24.22.1
+jobs:
+  cold-lint-js-and-md-slim:
+    runs-on: ubuntu-slim
+    outputs:
+      cache-restored: ${{ steps.lint.outputs.cache-restored }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Isolate test cache
+        run: printf '\n// Fallback validation run %s\n' "$GITHUB_RUN_ID" >> eslint.config.mjs
+      - uses: ./.github/actions/lint-js-and-md
+        id: lint
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+  cold-lint-js-and-md-fallback:
+    needs: cold-lint-js-and-md-slim
+    if: needs.cold-lint-js-and-md-slim.outputs.cache-restored == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Isolate test cache
+        run: printf '\n// Fallback validation run %s\n' "$GITHUB_RUN_ID" >> eslint.config.mjs
+      - uses: ./.github/actions/lint-js-and-md
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          run-on-cache-miss: 'true'
+  cold-lint-js-and-md:
+    needs:
+      - cold-lint-js-and-md-slim
+      - cold-lint-js-and-md-fallback
+    if: ${{ always() && github.event.pull_request.draft == false }}
+    runs-on: ubuntu-slim
+    steps:
+      - name: Check lint results
+        env:
+          SLIM_RESULT: ${{ needs.cold-lint-js-and-md-slim.result }}
+          CACHE_RESTORED: ${{ needs.cold-lint-js-and-md-slim.outputs.cache-restored }}
+          FALLBACK_RESULT: ${{ needs.cold-lint-js-and-md-fallback.result }}
+        run: |
+          test "$SLIM_RESULT" = success
+          if [ "$CACHE_RESTORED" = true ]; then
+            test "$FALLBACK_RESULT" = skipped
+          else
+            test "$CACHE_RESTORED" = false
+            test "$FALLBACK_RESULT" = success
+          fi
+      - name: Assert route
+        env:
+          RESTORED: ${{ needs.cold-lint-js-and-md-slim.outputs.cache-restored }}
+        run: test "$RESTORED" = false
+  warm-lint-js-and-md-slim:
+    runs-on: ubuntu-slim
+    outputs:
+      cache-restored: ${{ steps.lint.outputs.cache-restored }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Isolate test cache
+        run: printf '\n// Fallback validation run %s\n' "$GITHUB_RUN_ID" >> eslint.config.mjs
+      - uses: ./.github/actions/lint-js-and-md
+        id: lint
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+    needs: cold-lint-js-and-md
+  warm-lint-js-and-md-fallback:
+    needs: warm-lint-js-and-md-slim
+    if: needs.warm-lint-js-and-md-slim.outputs.cache-restored == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Isolate test cache
+        run: printf '\n// Fallback validation run %s\n' "$GITHUB_RUN_ID" >> eslint.config.mjs
+      - uses: ./.github/actions/lint-js-and-md
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          run-on-cache-miss: 'true'
+  warm-lint-js-and-md:
+    needs:
+      - warm-lint-js-and-md-slim
+      - warm-lint-js-and-md-fallback
+    if: ${{ always() && github.event.pull_request.draft == false }}
+    runs-on: ubuntu-slim
+    steps:
+      - name: Check lint results
+        env:
+          SLIM_RESULT: ${{ needs.warm-lint-js-and-md-slim.result }}
+          CACHE_RESTORED: ${{ needs.warm-lint-js-and-md-slim.outputs.cache-restored }}
+          FALLBACK_RESULT: ${{ needs.warm-lint-js-and-md-fallback.result }}
+        run: |
+          test "$SLIM_RESULT" = success
+          if [ "$CACHE_RESTORED" = true ]; then
+            test "$FALLBACK_RESULT" = skipped
+          else
+            test "$CACHE_RESTORED" = false
+            test "$FALLBACK_RESULT" = success
+          fi
+      - name: Assert route
+        env:
+          RESTORED: ${{ needs.warm-lint-js-and-md-slim.outputs.cache-restored }}
+        run: test "$RESTORED" = true
+  prefix-lint-js-and-md-slim:
+    runs-on: ubuntu-slim
+    outputs:
+      cache-restored: ${{ steps.lint.outputs.cache-restored }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Isolate test cache
+        run: printf '\n// Fallback validation run %s\n' "$GITHUB_RUN_ID" >> eslint.config.mjs
+      - name: Request a different primary key
+        run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          p = Path('.github/actions/lint-js-and-md/action.yml')
+          key = 'key: $' + '{{ env.cache-prefix }}-$' + '{{ github.sha }}'
+          p.write_text(p.read_text().replace(key, key + '-probe'))
+          PYTHON
+      - uses: ./.github/actions/lint-js-and-md
+        id: lint
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+    needs: warm-lint-js-and-md
+  prefix-lint-js-and-md-fallback:
+    needs: prefix-lint-js-and-md-slim
+    if: needs.prefix-lint-js-and-md-slim.outputs.cache-restored == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Isolate test cache
+        run: printf '\n// Fallback validation run %s\n' "$GITHUB_RUN_ID" >> eslint.config.mjs
+      - name: Request a different primary key
+        run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          p = Path('.github/actions/lint-js-and-md/action.yml')
+          key = 'key: $' + '{{ env.cache-prefix }}-$' + '{{ github.sha }}'
+          p.write_text(p.read_text().replace(key, key + '-probe'))
+          PYTHON
+      - uses: ./.github/actions/lint-js-and-md
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          run-on-cache-miss: 'true'
+  prefix-lint-js-and-md:
+    needs:
+      - prefix-lint-js-and-md-slim
+      - prefix-lint-js-and-md-fallback
+    if: ${{ always() && github.event.pull_request.draft == false }}
+    runs-on: ubuntu-slim
+    steps:
+      - name: Check lint results
+        env:
+          SLIM_RESULT: ${{ needs.prefix-lint-js-and-md-slim.result }}
+          CACHE_RESTORED: ${{ needs.prefix-lint-js-and-md-slim.outputs.cache-restored }}
+          FALLBACK_RESULT: ${{ needs.prefix-lint-js-and-md-fallback.result }}
+        run: |
+          test "$SLIM_RESULT" = success
+          if [ "$CACHE_RESTORED" = true ]; then
+            test "$FALLBACK_RESULT" = skipped
+          else
+            test "$CACHE_RESTORED" = false
+            test "$FALLBACK_RESULT" = success
+          fi
+      - name: Assert route
+        env:
+          RESTORED: ${{ needs.prefix-lint-js-and-md-slim.outputs.cache-restored }}
+        run: test "$RESTORED" = true
+  failure-propagation:
+    needs: prefix-lint-js-and-md
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Isolate test cache
+        run: printf '\n// Fallback validation run %s\n' "$GITHUB_RUN_ID" >> eslint.config.mjs
+      - name: Inject lint failure
+        run: |-
+          mkdir -p "$RUNNER_TEMP/fail-lint"
+          printf '#!/bin/sh\nexit 23\n' > "$RUNNER_TEMP/fail-lint/make"
+          chmod +x "$RUNNER_TEMP/fail-lint/make"
+          echo "$RUNNER_TEMP/fail-lint" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/lint-js-and-md
+        id: lint
+        continue-on-error: true
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Assert lint failed
+        env:
+          OUTCOME: ${{ steps.lint.outcome }}
+        run: test "$OUTCOME" = failure
+      - name: Required check must fail
+        id: gate
+        continue-on-error: true
+        env:
+          SLIM_RESULT: failure
+          CACHE_RESTORED: 'true'
+          FALLBACK_RESULT: skipped
+        run: |
+          test "$SLIM_RESULT" = success
+          if [ "$CACHE_RESTORED" = true ]; then
+            test "$FALLBACK_RESULT" = skipped
+          else
+            test "$CACHE_RESTORED" = false
+            test "$FALLBACK_RESULT" = success
+          fi
+      - name: Assert required check failed
+        env:
+          OUTCOME: ${{ steps.gate.outcome }}
+        run: test "$OUTCOME" = failure
