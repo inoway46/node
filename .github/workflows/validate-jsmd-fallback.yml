@@ -64,6 +64,7 @@ jobs:
           RESTORED: ${{ needs.cold-lint-js-and-md-slim.outputs.cache-restored }}
         run: test "$RESTORED" = false
   warm-lint-js-and-md-slim:
+    if: ${{ always() && needs.cold-lint-js-and-md.result == 'success' }}
     runs-on: ubuntu-slim
     outputs:
       cache-restored: ${{ steps.lint.outputs.cache-restored }}
@@ -117,6 +118,7 @@ jobs:
           RESTORED: ${{ needs.warm-lint-js-and-md-slim.outputs.cache-restored }}
         run: test "$RESTORED" = true
   prefix-lint-js-and-md-slim:
+    if: ${{ always() && needs.warm-lint-js-and-md.result == 'success' }}
     runs-on: ubuntu-slim
     outputs:
       cache-restored: ${{ steps.lint.outputs.cache-restored }}
@@ -186,6 +188,7 @@ jobs:
           RESTORED: ${{ needs.prefix-lint-js-and-md-slim.outputs.cache-restored }}
         run: test "$RESTORED" = true
   failure-propagation:
+    if: ${{ always() && needs.prefix-lint-js-and-md.result == 'success' }}
     needs: prefix-lint-js-and-md
     runs-on: ubuntu-slim
     steps:
