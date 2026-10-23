@@ -1,0 +1,326 @@
+name: JS/MD runner and cache study
+on:
+  push:
+    branches: [jsmd-runner-cache-study]
+    paths: [.github/workflows/jsmd-runner-cache-study.yml]
+permissions:
+  contents: read
+env:
+  NODE_VERSION: 24.22.1
+  SOURCE_SHA: e0619bb7e39092f191685f156449f8783fe712f7
+jobs:
+  seed:
+    if: github.repository == 'inoway46/node'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Lint JavaScript files
+        run: NODE=$(command -v node) make lint-js ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+      - name: Get release version numbers
+        id: versions
+        run: ./tools/lint-md/list-released-versions-from-changelogs.mjs >> "$GITHUB_OUTPUT"
+      - name: Lint markdown files
+        run: NODE=$(command -v node) make lint-md ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+        env:
+          NODE_RELEASED_VERSIONS: ${{ steps.versions.outputs.NODE_RELEASED_VERSIONS }}
+      - name: Save npm seed
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.npm
+          key: study-npm-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Save ESLint seed
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .eslintcache
+          key: study-eslint-${{ github.run_id }}-${{ github.run_attempt }}-seed
+  slim-warm:
+    needs: seed
+    name: slim-warm / ${{ matrix.trial }}
+    runs-on: ubuntu-slim
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        trial: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Restore fixed npm cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.npm
+          key: study-npm-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+      - name: Restore ESLint cache
+        id: eslint
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .eslintcache
+          key: study-result-${{ github.run_id }}-${{ github.run_attempt }}-slim-warm-${{ matrix.trial }}
+          restore-keys: study-eslint-${{ github.run_id }}-${{ github.run_attempt }}-
+          fail-on-cache-miss: true
+      - name: Verify cache condition
+        env:
+          MATCHED: ${{ steps.eslint.outputs.cache-matched-key }}
+        run: |
+          test -n "$MATCHED"
+          test -s .eslintcache
+          node --version
+          nproc
+      - name: Lint JavaScript files
+        run: NODE=$(command -v node) make lint-js ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+      - name: Get release version numbers
+        id: versions
+        run: ./tools/lint-md/list-released-versions-from-changelogs.mjs >> "$GITHUB_OUTPUT"
+      - name: Lint markdown files
+        run: NODE=$(command -v node) make lint-md ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+        env:
+          NODE_RELEASED_VERSIONS: ${{ steps.versions.outputs.NODE_RELEASED_VERSIONS }}
+      - name: Save ESLint results
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .eslintcache
+          key: ${{ steps.eslint.outputs.cache-primary-key }}
+  slim-cold:
+    needs: seed
+    name: slim-cold / ${{ matrix.trial }}
+    runs-on: ubuntu-slim
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        trial: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Restore fixed npm cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.npm
+          key: study-npm-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+      - name: Restore ESLint cache
+        id: eslint
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .eslintcache
+          key: study-result-${{ github.run_id }}-${{ github.run_attempt }}-slim-cold-${{ matrix.trial }}
+      - name: Verify cache condition
+        env:
+          MATCHED: ${{ steps.eslint.outputs.cache-matched-key }}
+        run: |
+          test -z "$MATCHED"
+          test ! -e .eslintcache
+          node --version
+          nproc
+      - name: Lint JavaScript files
+        run: NODE=$(command -v node) make lint-js ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+      - name: Get release version numbers
+        id: versions
+        run: ./tools/lint-md/list-released-versions-from-changelogs.mjs >> "$GITHUB_OUTPUT"
+      - name: Lint markdown files
+        run: NODE=$(command -v node) make lint-md ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+        env:
+          NODE_RELEASED_VERSIONS: ${{ steps.versions.outputs.NODE_RELEASED_VERSIONS }}
+      - name: Save ESLint results
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .eslintcache
+          key: ${{ steps.eslint.outputs.cache-primary-key }}
+  latest-warm:
+    needs: seed
+    name: latest-warm / ${{ matrix.trial }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        trial: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Restore fixed npm cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.npm
+          key: study-npm-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+      - name: Restore ESLint cache
+        id: eslint
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .eslintcache
+          key: study-result-${{ github.run_id }}-${{ github.run_attempt }}-latest-warm-${{ matrix.trial }}
+          restore-keys: study-eslint-${{ github.run_id }}-${{ github.run_attempt }}-
+          fail-on-cache-miss: true
+      - name: Verify cache condition
+        env:
+          MATCHED: ${{ steps.eslint.outputs.cache-matched-key }}
+        run: |
+          test -n "$MATCHED"
+          test -s .eslintcache
+          node --version
+          nproc
+      - name: Lint JavaScript files
+        run: NODE=$(command -v node) make lint-js ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+      - name: Get release version numbers
+        id: versions
+        run: ./tools/lint-md/list-released-versions-from-changelogs.mjs >> "$GITHUB_OUTPUT"
+      - name: Lint markdown files
+        run: NODE=$(command -v node) make lint-md ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+        env:
+          NODE_RELEASED_VERSIONS: ${{ steps.versions.outputs.NODE_RELEASED_VERSIONS }}
+      - name: Save ESLint results
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .eslintcache
+          key: ${{ steps.eslint.outputs.cache-primary-key }}
+  latest-cold:
+    needs: seed
+    name: latest-cold / ${{ matrix.trial }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        trial: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Restore fixed npm cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.npm
+          key: study-npm-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+      - name: Restore ESLint cache
+        id: eslint
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .eslintcache
+          key: study-result-${{ github.run_id }}-${{ github.run_attempt }}-latest-cold-${{ matrix.trial }}
+      - name: Verify cache condition
+        env:
+          MATCHED: ${{ steps.eslint.outputs.cache-matched-key }}
+        run: |
+          test -z "$MATCHED"
+          test ! -e .eslintcache
+          node --version
+          nproc
+      - name: Lint JavaScript files
+        run: NODE=$(command -v node) make lint-js ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+      - name: Get release version numbers
+        id: versions
+        run: ./tools/lint-md/list-released-versions-from-changelogs.mjs >> "$GITHUB_OUTPUT"
+      - name: Lint markdown files
+        run: NODE=$(command -v node) make lint-md ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+        env:
+          NODE_RELEASED_VERSIONS: ${{ steps.versions.outputs.NODE_RELEASED_VERSIONS }}
+      - name: Save ESLint results
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .eslintcache
+          key: ${{ steps.eslint.outputs.cache-primary-key }}
+  miss-probe:
+    needs: seed
+    name: miss-probe / ${{ matrix.trial }}
+    runs-on: ubuntu-slim
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        trial: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Restore fixed npm cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.npm
+          key: study-npm-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+      - name: Restore missing ESLint cache
+        id: eslint
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .eslintcache
+          key: study-probe-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.trial }}
+      - name: Verify miss
+        env:
+          MATCHED: ${{ steps.eslint.outputs.cache-matched-key }}
+        run: test -z "$MATCHED"
+  gate:
+    needs: miss-probe
+    name: gate / ${{ matrix.trial }}
+    runs-on: ubuntu-slim
+    strategy:
+      max-parallel: 2
+      matrix:
+        trial: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    steps:
+      - name: Check lint results
+        env:
+          SLIM_RESULT: success
+          CACHE_RESTORED: 'false'
+          FALLBACK_RESULT: success
+        run: |
+          test "$SLIM_RESULT" = success
+          if [ "$CACHE_RESTORED" = true ]; then
+            test "$FALLBACK_RESULT" = skipped
+          else
+            test "$CACHE_RESTORED" = false
+            test "$FALLBACK_RESULT" = success
+          fi
