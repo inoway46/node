@@ -1,0 +1,35 @@
+--- a/src/iterateJsdoc.js
++++ b/src/iterateJsdoc.js
+@@ -1,7 +1,7 @@
+ import * as jsdocUtils from './jsdocUtils.js';
+ import {
+   commentHandler,
+-  getJSDocComment,
++  getJSDocComment as findJSDocComment,
+   parseComment,
+ } from '@es-joy/jsdoccomment';
+ import {
+@@ -9,6 +9,23 @@
+   util,
+ } from 'comment-parser';
+ import esquery from 'esquery';
++
++// Only the most recent node is retained for each SourceCode.
++const commentLookups = new WeakMap();
++const getJSDocComment = (sourceCode, node, settings) => {
++  const { minLines, maxLines, skipInvokedExpressionsForCommentFinding } = settings;
++  const previous = commentLookups.get(sourceCode);
++  if (previous && previous.node === node &&
++      previous.minLines === minLines && previous.maxLines === maxLines &&
++      previous.skipInvokedExpressionsForCommentFinding === skipInvokedExpressionsForCommentFinding) {
++    return previous.comment;
++  }
++  const comment = findJSDocComment(sourceCode, node, settings);
++  commentLookups.set(sourceCode, {
++    node, minLines, maxLines, skipInvokedExpressionsForCommentFinding, comment,
++  });
++  return comment;
++};
+ 
+ /**
+  * @typedef {number} Integer

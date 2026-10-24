@@ -1,0 +1,69 @@
+name: JSDoc lookup comparison
+on:
+  push:
+    branches: [jsdoc-lookup-benchmark]
+    paths: [.github/workflows/jsdoc-lookup-study.yml, .github/jsdoc-lookup.patch]
+permissions:
+  contents: read
+jobs:
+  lint:
+    if: github.repository == 'inoway46/node'
+    name: ${{ matrix.variant }} / ${{ matrix.trial }}
+    runs-on: ubuntu-slim
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        trial: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        variant: [baseline, candidate]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.22.1
+          package-manager-cache: false
+      - name: Install ESLint dependencies
+        run: node deps/npm/bin/npm-cli.js ci --prefix tools/eslint
+      - name: Apply candidate
+        if: matrix.variant == 'candidate'
+        run: patch -p1 -d tools/eslint/node_modules/eslint-plugin-jsdoc < .github/jsdoc-lookup.patch
+      - name: Assert cold cache
+        run: test ! -e .eslintcache
+      - name: Lint JavaScript files
+        run: |
+          node tools/eslint/node_modules/eslint/bin/eslint.js --cache --cache-strategy content --max-warnings=0 --report-unused-disable-directives --concurrency auto --format json --output-file "$RUNNER_TEMP/diagnostics.json" eslint.config.mjs benchmark doc lib test tools
+      - name: Get release version numbers
+        id: versions
+        run: ./tools/lint-md/list-released-versions-from-changelogs.mjs >> "$GITHUB_OUTPUT"
+      - name: Lint Markdown and verify man page
+        run: NODE=$(command -v node) make lint-md ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+        env:
+          NODE_RELEASED_VERSIONS: ${{ steps.versions.outputs.NODE_RELEASED_VERSIONS }}
+      - name: Normalize diagnostics
+        if: always()
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, pathlib, hashlib
+          p = pathlib.Path(os.environ['RUNNER_TEMP'])
+          f = p / 'diagnostics.json'
+          if f.exists():
+              rows = json.loads(f.read_text())
+              for r in rows:
+                  r['filePath'] = os.path.relpath(r['filePath'])
+              rows.sort(key=lambda r: r['filePath'])
+              data = json.dumps(rows, sort_keys=True, separators=(',', ':')).encode()
+              f.write_bytes(data)
+              (p / 'diagnostics-summary.json').write_text(json.dumps({
+                  'sha256': hashlib.sha256(data).hexdigest(),
+                  'files': len(rows), 'errors': sum(r['errorCount'] for r in rows),
+                  'warnings': sum(r['warningCount'] for r in rows)}))
+          PYTHON
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diagnostics-${{ matrix.variant }}-${{ matrix.trial }}
+          path: ${{ runner.temp }}/diagnostics*.json
+          if-no-files-found: warn
