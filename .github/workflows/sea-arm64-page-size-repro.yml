@@ -46,7 +46,7 @@ jobs:
       - name: Download official releases and generate SEA files
         run: |
           set -euxo pipefail
-          for version in 26.8.2 26.9.0 26.13.0; do
+          for version in 26.8.2 26.9.0 26.12.0 26.13.0; do
             mkdir -p "downloads/$version" "payload/$version"
             (
               cd "downloads/$version"
@@ -103,7 +103,7 @@ jobs:
             ln -s busybox "payload/bin/$applet"
           done
           cp /usr/bin/getconf /usr/bin/strace payload/bin/
-          for executable in payload/26.8.2/node payload/26.9.0/node payload/26.13.0/node /usr/bin/getconf /usr/bin/strace; do
+          for executable in payload/26.8.2/node payload/26.9.0/node payload/26.12.0/node payload/26.13.0/node /usr/bin/getconf /usr/bin/strace; do
             ldd "$executable" | tee -a evidence/shared-libraries.txt
             while read -r library; do
               cp --parents -L "$library" payload/
@@ -125,7 +125,7 @@ jobs:
           echo "PAGE_SIZE=$page EXPECTED=$expected"
           ok=1
           [ "$page" = "$expected" ] || ok=0
-          for version in 26.8.2 26.9.0 26.13.0; do
+          for version in 26.8.2 26.9.0 26.12.0 26.13.0; do
             timeout 60 "/$version/node" --version > /tmp/node.txt 2>&1
             stock_rc=$?
             cat /tmp/node.txt
@@ -167,7 +167,7 @@ jobs:
         run: |
           set -o pipefail
           timeout 600 qemu-system-aarch64 \
-            -machine virt -cpu max -accel tcg -smp 2 -m 3072 \
+            -machine virt -cpu max -accel tcg -smp 2 -m 4096 \
             -nographic -no-reboot -nic none \
             -kernel vmlinuz -initrd initramfs.cpio.gz \
             -append 'console=ttyAMA0 rdinit=/init panic=-1' \
