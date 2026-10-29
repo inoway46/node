@@ -29,7 +29,7 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-19 lld-19 ninja-build
+          sudo apt-get install -y clang-19 lld-19 ninja-build zstd
           rustup override set 1.88
           df -h .
       - name: Prove the regression test fails on official v26.13.0
@@ -60,11 +60,87 @@ jobs:
           set -euxo pipefail
           git rev-parse HEAD > build-evidence/source-sha.txt
           ./configure --ninja 2>&1 | tee build-evidence/configure.txt
-          ninja -C out/Release -j4 node 2>&1 | tee build-evidence/build.txt
+          ninja -C out/Release -t commands node > build-evidence/build-commands.txt
+          ninja -C out/Release -d keeprsp -j4 node 2>&1 | tee build-evidence/build.txt
           out/Release/node --version | tee build-evidence/node-version.txt
           readelf -hW out/Release/node | tee build-evidence/node-header.txt
           grep -E 'Type: +EXEC' build-evidence/node-header.txt
           cp config.gypi build-evidence/
+      - name: Capture ELF layout and build environment before tests
+        run: |
+          set -euxo pipefail
+          for kind in h l S d n; do
+            readelf -"$kind"W out/Release/node > "build-evidence/readelf-$kind.txt"
+          done
+          sha256sum out/Release/node > build-evidence/node-sha256.txt
+          ninja -C out/Release -t query node > build-evidence/node-build-inputs.txt
+          {
+            uname -a
+            getconf PAGESIZE
+            clang-19 --version
+            clang-19 -print-prog-name=ld.lld
+            ld.lld --version
+            ld.lld-19 --version
+            ninja --version
+            python3 --version
+            rustc --version
+            dpkg-query -W clang-19 lld-19 libc6 libc6-dev libstdc++6 ninja-build
+            du -sh out
+            df -h .
+          } > build-evidence/build-environment.txt
+          python3 - <<'ELF' | tee build-evidence/bss-layout.json
+          import json
+          import struct
+          from pathlib import Path
+          data = Path('out/Release/node').read_bytes()
+          assert data[:6] == b'\x7fELF\x02\x01'
+          phoff = struct.unpack_from('<Q', data, 32)[0]
+          phsize, count = struct.unpack_from('<HH', data, 54)
+          loads = []
+          for i in range(count):
+              kind, flags, offset, va, pa, filesz, memsz, align = struct.unpack_from('<IIQQQQQQ', data, phoff + i * phsize)
+              if kind == 1:
+                  loads.append(dict(index=i, flags=flags, offset=hex(offset),
+                                    vaddr=hex(va), filesz=hex(filesz), memsz=hex(memsz),
+                                    alignment=hex(align), bss_like=filesz < memsz))
+          bss_count = sum(segment['bss_like'] for segment in loads)
+          print(json.dumps(dict(load_segments=loads, bss_like_count=bss_count,
+                                lief_bss_end_requires_exactly_one=bss_count == 1), indent=2))
+          ELF
+      - name: Package executable before tests
+        run: |
+          tar -cf node-binary.tar out/Release/node build-evidence
+          sha256sum node-binary.tar > node-binary.tar.sha256
+      - name: Save executable and diagnostics before tests
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: sea-node-binary
+          path: |
+            node-binary.tar
+            node-binary.tar.sha256
+          compression-level: 1
+          retention-days: 7
+          if-no-files-found: error
+      - name: Package build tree for inspection and relinking
+        run: |
+          set -euxo pipefail
+          files=(out build-evidence config.gypi)
+          for file in config.mk config.status icu_config.gypi; do
+            if [ -f "$file" ]; then files+=("$file"); fi
+          done
+          tar -I 'zstd -T2 -3' -cf node-build-tree.tar.zst "${files[@]}"
+          sha256sum node-build-tree.tar.zst > node-build-tree.tar.zst.sha256
+          ls -lh node-build-tree.tar.zst | tee build-evidence/build-archive-size.txt
+      - name: Save build tree before tests
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: sea-node-build-tree
+          path: |
+            node-build-tree.tar.zst
+            node-build-tree.tar.zst.sha256
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
       - name: Run new regression test and SEA suite
         run: |
           set -euxo pipefail
