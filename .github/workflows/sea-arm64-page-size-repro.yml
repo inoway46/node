@@ -21,13 +21,17 @@ jobs:
           - page: 16384
             image: debian:trixie
             package: linux-image-arm64-16k
+            # v26.9.0's layout happens to work with 16 KiB pages.
+            sea_exit: 0
           - page: 65536
             image: ubuntu:24.04
             package: linux-image-generic-64k
+            sea_exit: 139
     env:
       EXPECTED_PAGE: ${{ matrix.page }}
       KERNEL_IMAGE: ${{ matrix.image }}
       KERNEL_PACKAGE: ${{ matrix.package }}
+      EXPECTED_SEA_EXIT: ${{ matrix.sea_exit }}
     steps:
       - name: Install emulator and inspection tools
         run: |
@@ -106,6 +110,7 @@ jobs:
             done < <(ldd "$executable" | awk '/=> \// {print $3} /^[[:space:]]*\// {print $1}')
           done
           printf '%s\n' "$EXPECTED_PAGE" > payload/expected-page
+          printf '%s\n' "$EXPECTED_SEA_EXIT" > payload/expected-sea-exit
           cat > payload/init <<'GUEST'
           #!/bin/sh
           export PATH=/bin
@@ -132,7 +137,10 @@ jobs:
             if [ "$version" = 26.8.2 ]; then
               [ "$sea_rc" = 0 ] && grep -qx "hello from sea v$version" /tmp/sea.txt || ok=0
             else
-              [ "$sea_rc" = 139 ] || ok=0
+              [ "$sea_rc" = "$(cat /expected-sea-exit)" ] || ok=0
+              if [ "$sea_rc" = 0 ]; then
+                grep -qx "hello from sea v$version" /tmp/sea.txt || ok=0
+              fi
               timeout 60 strace -f -e trace=execve "/$version/hello" 2>&1
             fi
           done
