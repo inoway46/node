@@ -78,8 +78,9 @@ jobs:
             uname -a
             getconf PAGESIZE
             clang-19 --version
-            clang-19 -print-prog-name=ld.lld
-            ld.lld --version
+            linker_path=$(clang-19 -print-prog-name=ld.lld)
+            echo "$linker_path"
+            "$linker_path" --version
             ld.lld-19 --version
             ninja --version
             python3 --version
