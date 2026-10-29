@@ -1,0 +1,255 @@
+name: SEA arm64 LIEF fix verification
+
+on:
+  push:
+    branches: [sea-arm64-page-size-repro]
+    paths:
+      - .github/workflows/sea-arm64-page-size-fix.yml
+      - tools/sea-lief-probe/**
+      - deps/LIEF/src/ELF/Binary.cpp
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.repository == 'inoway46/node'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build g++ binutils
+      - name: Prepare official v26.13.0 and one SEA blob
+        run: |
+          set -euxo pipefail
+          mkdir downloads payload build-evidence
+          cd downloads
+          archive=node-v26.13.0-linux-arm64.tar.xz
+          curl --fail --location --retry 3 -O "https://nodejs.org/dist/v26.13.0/$archive"
+          curl --fail --location --retry 3 -O https://nodejs.org/dist/v26.13.0/SHASUMS256.txt
+          grep "  $archive\$" SHASUMS256.txt > ../build-evidence/SHA256SUM
+          sha256sum --check ../build-evidence/SHA256SUM
+          tar -xJf "$archive" --strip-components=1 node-v26.13.0-linux-arm64/bin/node
+          cp bin/node ../payload/node
+          printf '%s\n' 'console.log("hello from sea", process.version);' > main.js
+          printf '%s\n' '{"main":"main.js","output":"sea.blob","disableExperimentalSEAWarning":true}' > blob.json
+          bin/node --experimental-sea-config blob.json
+          printf '%s\n' '{"main":"main.js","output":"../payload/official","disableExperimentalSEAWarning":true}' > sea.json
+          bin/node --build-sea sea.json
+          sha256sum sea.blob > ../build-evidence/blob-checksum.txt
+      - name: Build baseline LIEF and inject
+        run: |
+          set -euxo pipefail
+          git rev-parse HEAD > build-evidence/fixed-source-sha.txt
+          cp deps/LIEF/src/ELF/Binary.cpp /tmp/fixed-Binary.cpp
+          git show 463e381366711d748fc06bdd46571afef055ade5:deps/LIEF/src/ELF/Binary.cpp > deps/LIEF/src/ELF/Binary.cpp
+          git diff -- deps/LIEF/src/ELF/Binary.cpp > build-evidence/reverse-fix.diff
+          python3 tools/gyp/gyp_main.py tools/sea-lief-probe/probe.gyp --depth=. -f ninja-linux -Goutput_dir=out/lief-probe -Dpython=python3 -Dtarget_arch=arm64 -Dhost_arch=arm64 -DOS=linux
+          ninja -C out/lief-probe/Release -j2 sea_lief_probe 2>&1 | tee build-evidence/build-before.txt
+          out/lief-probe/Release/sea_lief_probe payload/node downloads/sea.blob payload/before
+      - name: Rebuild changed LIEF source and inject
+        run: |
+          set -euxo pipefail
+          cp /tmp/fixed-Binary.cpp deps/LIEF/src/ELF/Binary.cpp
+          ninja -C out/lief-probe/Release -j2 sea_lief_probe 2>&1 | tee build-evidence/build-after.txt
+          out/lief-probe/Release/sea_lief_probe payload/node downloads/sea.blob payload/after
+          git diff --exit-code
+          chmod +x payload/official payload/before payload/after
+          test "$(getconf PAGESIZE)" = 4096
+          for variant in official before after; do
+            payload/"$variant" | tee "build-evidence/host-$variant.txt"
+            grep -Fx 'hello from sea v26.13.0' "build-evidence/host-$variant.txt"
+            readelf -lW "payload/$variant" > "build-evidence/segments-$variant.txt"
+          done
+          sha256sum payload/* > build-evidence/output-checksums.txt
+      - name: Check ELF invariants before and after
+        run: |
+          python3 - <<'ELF' | tee build-evidence/elf-checks.txt
+          import struct
+          from pathlib import Path
+          for variant in ('official', 'before', 'after'):
+              data = Path('payload', variant).read_bytes()
+              assert data[:6] == b'\x7fELF\x02\x01'
+              phoff = struct.unpack_from('<Q', data, 32)[0]
+              phsize, count = struct.unpack_from('<HH', data, 54)
+              loads = []
+              for i in range(count):
+                  t, flags, offset, va, pa, filesz, memsz, align = struct.unpack_from('<IIQQQQQQ', data, phoff + i * phsize)
+                  if t == 1 and memsz:
+                      loads.append((offset, va, memsz, align))
+              for page in (4096, 16384, 65536):
+                  errors = []
+                  spans = []
+                  for offset, va, size, align in loads:
+                      if offset % page != va % page:
+                          errors.append(f'offset/address incongruence: {offset:#x}/{va:#x}')
+                      spans.append((va // page, (va + size - 1) // page))
+                  spans.sort()
+                  for left, right in zip(spans, spans[1:]):
+                      if right[0] <= left[1]:
+                          errors.append(f'overlapping pages: {left}/{right}')
+                  print(variant, page, errors)
+                  if variant == 'after' or page == 4096:
+                      assert not errors
+                  else:
+                      assert errors, 'baseline must expose the structural regression'
+          ELF
+      - name: Package executable inputs
+        run: tar -cf products.tar payload build-evidence
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: sea-injection-products
+          path: products.tar
+          compression-level: 1
+      - name: Upload build evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: sea-fix-build-evidence
+          path: build-evidence/
+
+  verify:
+    needs: build
+    if: github.repository == 'inoway46/node'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - page: 16384
+            image: debian:trixie
+            package: linux-image-arm64-16k
+          - page: 65536
+            image: ubuntu:24.04
+            package: linux-image-generic-64k
+    env:
+      EXPECTED_PAGE: ${{ matrix.page }}
+      KERNEL_IMAGE: ${{ matrix.image }}
+      KERNEL_PACKAGE: ${{ matrix.package }}
+    steps:
+      - name: Install emulator and inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-arm busybox-static cpio binutils strace
+          mkdir -p evidence payload/bin payload/proc payload/sys payload/dev payload/tmp
+          uname -a | tee evidence/host.txt
+          getconf PAGESIZE | tee -a evidence/host.txt
+          test "$(getconf PAGESIZE)" = 4096
+          qemu-system-aarch64 --version | tee -a evidence/host.txt
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: sea-injection-products
+      - name: Unpack identical inputs and injected executables
+        run: |
+          tar -xf products.tar
+          cp build-evidence/* evidence/
+
+      - name: Obtain distribution kernel
+        run: |
+          set -euxo pipefail
+          docker pull "$KERNEL_IMAGE"
+          docker image inspect "$KERNEL_IMAGE" > evidence/container-image.json
+          docker run --name kernel-source -e DEBIAN_FRONTEND=noninteractive "$KERNEL_IMAGE" \
+            sh -euxc 'apt-get update; apt-get install -y --no-install-recommends "$1"; dpkg-query -W' sh "$KERNEL_PACKAGE" \
+            2>&1 | tee evidence/kernel-packages.txt
+          mkdir kernel
+          docker cp kernel-source:/boot/. kernel/
+          kernel_path=$(find kernel -maxdepth 1 -name 'vmlinuz-*' | head -n 1)
+          test -n "$kernel_path"
+          cp "$kernel_path" vmlinuz
+          cp kernel/config-* evidence/
+          sha256sum vmlinuz | tee evidence/kernel-checksum.txt
+          if [ "$EXPECTED_PAGE" = 16384 ]; then
+            grep -H '^CONFIG_ARM64_16K_PAGES=y' evidence/config-*
+          else
+            grep -H '^CONFIG_ARM64_64K_PAGES=y' evidence/config-*
+          fi
+
+      - name: Assemble minimal guest initramfs
+        run: |
+          set -euxo pipefail
+          cp /bin/busybox payload/bin/busybox
+          for applet in sh mount uname cat poweroff sync timeout dmesg tail grep; do
+            ln -s busybox "payload/bin/$applet"
+          done
+          cp /usr/bin/getconf /usr/bin/strace payload/bin/
+          for executable in payload/node /usr/bin/getconf /usr/bin/strace; do
+            ldd "$executable" | tee -a evidence/shared-libraries.txt
+            while read -r library; do
+              cp --parents -L "$library" payload/
+            done < <(ldd "$executable" | awk '/=> \// {print $3} /^[[:space:]]*\// {print $1}')
+          done
+          printf '%s\n' "$EXPECTED_PAGE" > payload/expected-page
+          cat > payload/init <<'GUEST'
+          #!/bin/sh
+          export PATH=/bin
+          mount -t proc proc /proc
+          mount -t sysfs sysfs /sys
+          mount -t devtmpfs devtmpfs /dev
+          ulimit -c 0
+          echo SEA_GUEST_BEGIN
+          uname -a
+          page=$(getconf PAGESIZE)
+          expected=$(cat /expected-page)
+          echo "PAGE_SIZE=$page EXPECTED=$expected"
+          ok=1
+          [ "$page" = "$expected" ] || ok=0
+          timeout 60 /node --version > /tmp/node.txt 2>&1
+          stock_rc=$?
+          cat /tmp/node.txt
+          [ "$stock_rc" = 0 ] && grep -Fxq 'v26.13.0' /tmp/node.txt || ok=0
+          for variant in official before after; do
+            timeout 60 "/$variant" > /tmp/sea.txt 2>&1
+            sea_rc=$?
+            cat /tmp/sea.txt
+            echo "RESULT version=26.13.0 variant=$variant page=$page stock_exit=$stock_rc sea_exit=$sea_rc"
+            if [ "$variant" = after ]; then
+              [ "$sea_rc" = 0 ] && grep -Fxq 'hello from sea v26.13.0' /tmp/sea.txt || ok=0
+            else
+              [ "$sea_rc" = 139 ] || ok=0
+              timeout 60 strace -f -e trace=execve "/$variant" 2>&1
+            fi
+          done
+          dmesg | tail -n 30
+          if [ "$ok" = 1 ]; then
+            echo SEA_FIX_PASS
+          else
+            echo SEA_FIX_FAIL
+          fi
+          sync
+          poweroff -f
+          GUEST
+          chmod +x payload/init
+          (cd payload && find . -print0 | cpio --null -o --format=newc --owner=0:0 | gzip -1) > initramfs.cpio.gz
+
+      - name: Boot real large-page kernel and assert before/after behavior
+        run: |
+          set -o pipefail
+          timeout 600 qemu-system-aarch64 \
+            -machine virt -cpu max -accel tcg -smp 2 -m 4096 \
+            -nographic -no-reboot -nic none \
+            -kernel vmlinuz -initrd initramfs.cpio.gz \
+            -append 'console=ttyAMA0 rdinit=/init panic=-1' \
+            2>&1 | tee evidence/guest-console.txt
+          grep -q '^SEA_FIX_PASS' evidence/guest-console.txt
+          {
+            echo '### SEA LIEF fix verification'
+            echo '```text'
+            grep -E 'PAGE_SIZE=|RESULT |SEA_FIX_' evidence/guest-console.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: sea-fix-${{ matrix.page }}-evidence
+          path: evidence/
+          if-no-files-found: error

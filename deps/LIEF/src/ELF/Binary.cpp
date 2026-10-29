@@ -3021,9 +3021,11 @@ uint64_t Binary::relocate_phdr_table_v2() {
   std::vector<Segment*> load_seg;
   Segment* bss_segment = nullptr;
   size_t bss_cnt = 0;
+  uint64_t segment_alignment = page_size();
   for (std::unique_ptr<Segment>& segment : segments_) {
     if (segment->is_load()) {
       load_seg.push_back(segment.get());
+      segment_alignment = std::max(segment_alignment, segment->alignment());
       if (segment->physical_size() < segment->virtual_size()) {
         bss_segment = segment.get();
         ++bss_cnt;
@@ -3095,7 +3097,7 @@ uint64_t Binary::relocate_phdr_table_v2() {
   const uint64_t new_phdr_offset =
       align(bss_segment->virtual_address() - imagebase() +
                 bss_segment->virtual_size(),
-            0x1000);
+            segment_alignment);
 
   const size_t nb_segments = header.numberof_segments() +
                              /* custom PT_LOAD */ 1 + USER_SEGMENTS;
@@ -3125,7 +3127,9 @@ uint64_t Binary::relocate_phdr_table_v2() {
   nsegment_addr->virtual_address(imagebase() + phdr_reloc_info_.new_offset);
   nsegment_addr->physical_address(imagebase() + phdr_reloc_info_.new_offset);
   nsegment_addr->flags(Segment::FLAGS::R);
-  nsegment_addr->alignment(0x1000);
+  // Preserve the input's page alignment so the new read-only segment cannot
+  // share a larger page with the writable BSS segment.
+  nsegment_addr->alignment(segment_alignment);
   nsegment_addr->file_offset(phdr_reloc_info_.new_offset);
   nsegment_addr->datahandler_ = datahandler_.get();
 
