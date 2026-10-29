@@ -46,7 +46,7 @@ jobs:
       - name: Download official releases and generate SEA files
         run: |
           set -euxo pipefail
-          for version in 26.8.2 26.9.0; do
+          for version in 26.8.2 26.9.0 26.13.0; do
             mkdir -p "downloads/$version" "payload/$version"
             (
               cd "downloads/$version"
@@ -103,7 +103,7 @@ jobs:
             ln -s busybox "payload/bin/$applet"
           done
           cp /usr/bin/getconf /usr/bin/strace payload/bin/
-          for executable in payload/26.8.2/node payload/26.9.0/node /usr/bin/getconf /usr/bin/strace; do
+          for executable in payload/26.8.2/node payload/26.9.0/node payload/26.13.0/node /usr/bin/getconf /usr/bin/strace; do
             ldd "$executable" | tee -a evidence/shared-libraries.txt
             while read -r library; do
               cp --parents -L "$library" payload/
@@ -125,7 +125,7 @@ jobs:
           echo "PAGE_SIZE=$page EXPECTED=$expected"
           ok=1
           [ "$page" = "$expected" ] || ok=0
-          for version in 26.8.2 26.9.0; do
+          for version in 26.8.2 26.9.0 26.13.0; do
             timeout 60 "/$version/node" --version > /tmp/node.txt 2>&1
             stock_rc=$?
             cat /tmp/node.txt
@@ -136,12 +136,19 @@ jobs:
             echo "RESULT version=$version page=$page stock_exit=$stock_rc sea_exit=$sea_rc"
             if [ "$version" = 26.8.2 ]; then
               [ "$sea_rc" = 0 ] && grep -qx "hello from sea v$version" /tmp/sea.txt || ok=0
-            else
+            elif [ "$version" = 26.9.0 ]; then
               [ "$sea_rc" = "$(cat /expected-sea-exit)" ] || ok=0
               if [ "$sea_rc" = 0 ]; then
                 grep -qx "hello from sea v$version" /tmp/sea.txt || ok=0
               fi
               timeout 60 strace -f -e trace=execve "/$version/hello" 2>&1
+            else
+              # Observe the new release without assuming it is fixed or broken.
+              case "$sea_rc" in
+                0) grep -qx "hello from sea v$version" /tmp/sea.txt || ok=0 ;;
+                126|139) timeout 60 strace -f -e trace=execve "/$version/hello" 2>&1 ;;
+                *) ok=0 ;;
+              esac
             fi
           done
           dmesg | tail -n 30
@@ -160,7 +167,7 @@ jobs:
         run: |
           set -o pipefail
           timeout 600 qemu-system-aarch64 \
-            -machine virt -cpu max -accel tcg -smp 2 -m 2048 \
+            -machine virt -cpu max -accel tcg -smp 2 -m 3072 \
             -nographic -no-reboot -nic none \
             -kernel vmlinuz -initrd initramfs.cpio.gz \
             -append 'console=ttyAMA0 rdinit=/init panic=-1' \
