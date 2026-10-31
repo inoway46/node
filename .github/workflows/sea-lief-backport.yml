@@ -1,0 +1,305 @@
+name: SEA Node v26.13.0 LIEF 5da7685 backport
+'on':
+  push:
+    branches:
+    - codex/sea-v26.13.0-lief-5da7685
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options:
+        - build-and-verify
+        - verify-only
+        default: build-and-verify
+        required: true
+      source_run_id:
+        type: string
+        description: Same-repository artifact source run ID (required for verify-only)
+        required: false
+permissions:
+  contents: read
+  actions: read
+jobs:
+  build:
+    if: github.event_name == 'push' || inputs.mode == 'build-and-verify'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    env:
+      CC: clang-19
+      CXX: clang++-19
+      CFLAGS: -fno-pie
+      CXXFLAGS: -fno-pie
+      LDFLAGS: -fuse-ld=bfd -no-pie -Wl,-z,max-page-size=65536,-z,common-page-size=65536
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+    - run: sudo apt-get update && sudo apt-get install -y clang-19 binutils ninja-build
+    - name: Build Node and generate both controls
+      run: |
+        set -euxo pipefail
+        mkdir -p build-evidence payload downloads
+         git rev-parse HEAD > build-evidence/source-sha.txt
+         git diff v26.13.0 HEAD -- deps/LIEF > build-evidence/backport.diff
+        printf '%s\n' 5da76859ef9272689a13a2669746d15391cde03a > build-evidence/lief-patch-sha.txt
+        printf '%s\n' 18b32a3b1552e199a01f1a8d9fd64aa756d3b75b > build-evidence/node-base-sha.txt
+        uname -a > build-evidence/environment.txt
+        clang-19 --version >> build-evidence/environment.txt
+        ld.bfd --version >> build-evidence/environment.txt
+        ./configure --ninja 2>&1 | tee build-evidence/configure.log
+        cp config.gypi build-evidence/
+        ninja -C out/Release -j2 node 2>&1 | tee build-evidence/build.log
+        cp out/Release/node payload/node
+        out/Release/node --version
+        readelf -h -l -W out/Release/node > build-evidence/node.readelf.txt
+        ldd out/Release/node > build-evidence/ldd.txt
+        cd downloads
+        archive=node-v26.13.0-linux-arm64.tar.xz
+        curl -fL --retry 3 -O "https://nodejs.org/dist/v26.13.0/$archive"
+        curl -fL --retry 3 -O https://nodejs.org/dist/v26.13.0/SHASUMS256.txt
+        grep "  $archive\$" SHASUMS256.txt > official.sha256
+        sha256sum -c official.sha256
+        tar -xJf "$archive" --strip-components=1 node-v26.13.0-linux-arm64/bin/node
+        cp bin/node ../payload/official-node
+        cp official.sha256 SHASUMS256.txt ../build-evidence/
+        cd ../payload
+        printf '%s\n' 'console.log("hello from sea", process.version);' > main.js
+        printf '%s\n' '{"main":"main.js","output":"regenerated","disableExperimentalSEAWarning":true}' > sea.json
+        ./official-node --build-sea sea.json 2>&1 | tee ../build-evidence/official-generation.log
+        mv regenerated official
+        ./node --build-sea sea.json 2>&1 | tee ../build-evidence/patched-generation.log
+        mv regenerated patched
+        cd ..
+        cp tools/sea-backport/run.sh payload/run.sh
+        cp tools/sea-backport/check-elf.cjs payload/check-elf.cjs
+        python3 - <<'META'
+        import json, platform, subprocess
+        from pathlib import Path
+        Path('metadata.json').write_text(json.dumps(dict(version='v26.13.0', arch='arm64', patch='5da76859ef9272689a13a2669746d15391cde03a', base='18b32a3b1552e199a01f1a8d9fd64aa756d3b75b', source=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(), configure='./configure --ninja', linker='GNU ld.bfd', max_page_size=65536), indent=2))
+        META
+        sha256sum payload/* out/Release/node metadata.json build-evidence/* > SHA256SUMS
+        tar -czf products.tar.gz payload out/Release/node metadata.json SHA256SUMS build-evidence
+        sha256sum products.tar.gz > products.tar.gz.sha256
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: node-v26.13.0-linux-arm64-lief-5da7685
+        path: products.tar.gz*
+        retention-days: 30
+        if-no-files-found: error
+    - if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: node-v26.13.0-linux-arm64-lief-5da7685-build-logs
+        path: build-evidence/
+        retention-days: 30
+  verify-4k:
+    needs: build
+    if: ${{ always() && (needs.build.result == 'success' || (inputs.mode == 'verify-only' && needs.build.result
+      == 'skipped')) }}
+    runs-on: ubuntu-24.04-arm
+    env:
+      EXPECTED_PAGE: '4096'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+    - name: Require explicit source run for verify-only
+      if: inputs.mode == 'verify-only'
+      run: 'test -n "${{ inputs.source_run_id }}" || { echo ''ERROR: verify-only requires source_run_id; no automatic
+        rebuild''; exit 1; }'
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+      with:
+        name: node-v26.13.0-linux-arm64-lief-5da7685
+        run-id: ${{ inputs.mode == 'verify-only' && inputs.source_run_id || github.run_id }}
+        github-token: ${{ github.token }}
+        repository: ${{ github.repository }}
+    - name: Verify archive, contents and provenance
+      run: |
+        set -euxo pipefail
+        sha256sum -c products.tar.gz.sha256
+        tar -xzf products.tar.gz
+        sha256sum -c SHA256SUMS
+        python3 - <<'META'
+        import json
+        from pathlib import Path
+        m=json.loads(Path('metadata.json').read_text())
+        assert m['version']=='v26.13.0' and m['arch']=='arm64'
+        assert m['patch']=='5da76859ef9272689a13a2669746d15391cde03a'
+        assert m['base']=='18b32a3b1552e199a01f1a8d9fd64aa756d3b75b'
+        assert Path('build-evidence/lief-patch-sha.txt').read_text().strip()==m['patch']
+        META
+        mkdir -p evidence
+        cp -r build-evidence evidence/build
+        cp metadata.json SHA256SUMS evidence/
+    - name: Inspect all artifacts at target page size
+      run: |
+        set -uo pipefail
+        failed=0
+        for v in node official-node patched official; do
+          readelf -h -l -W payload/$v > evidence/$v.readelf.txt
+          python3 tools/sea-backport/check-elf.py payload/$v "$EXPECTED_PAGE" > evidence/$v.layout.json 2>&1
+          rc=$?
+          echo "$v layout_exit=$rc" | tee -a evidence/layout-status.txt
+          if [ "$v" != official ] && [ "$rc" != 0 ]; then failed=1; fi
+        done
+        # Defer failure until after execution so all empirical evidence is collected.
+        echo "$failed" > evidence/layout-failed
+    - run: |
+        set -o pipefail
+        PAYLOAD=payload sh payload/run.sh 2>&1 | tee evidence/host-execution.log
+        readelf -h -l -W payload/regenerated > evidence/regenerated.readelf.txt
+        python3 tools/sea-backport/check-elf.py payload/regenerated 4096 > evidence/regenerated.layout.json
+        test "$(cat evidence/layout-failed)" = 0
+    - if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: node-v26.13.0-linux-arm64-lief-5da7685-4096-evidence
+        path: evidence/
+        retention-days: 30
+        if-no-files-found: error
+  verify-large-pages:
+    needs: build
+    if: ${{ always() && (needs.build.result == 'success' || (inputs.mode == 'verify-only' && needs.build.result
+      == 'skipped')) }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - page: 16384
+          image: debian:trixie
+          package: linux-image-arm64-16k
+        - page: 65536
+          image: ubuntu:24.04
+          package: linux-image-generic-64k
+    env:
+      EXPECTED_PAGE: ${{ matrix.page }}
+      KERNEL_IMAGE: ${{ matrix.image }}
+      KERNEL_PACKAGE: ${{ matrix.package }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+    - name: Require explicit source run for verify-only
+      if: inputs.mode == 'verify-only'
+      run: 'test -n "${{ inputs.source_run_id }}" || { echo ''ERROR: verify-only requires source_run_id; no automatic
+        rebuild''; exit 1; }'
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+      with:
+        name: node-v26.13.0-linux-arm64-lief-5da7685
+        run-id: ${{ inputs.mode == 'verify-only' && inputs.source_run_id || github.run_id }}
+        github-token: ${{ github.token }}
+        repository: ${{ github.repository }}
+    - name: Verify archive, contents and provenance
+      run: |
+        set -euxo pipefail
+        sha256sum -c products.tar.gz.sha256
+        tar -xzf products.tar.gz
+        sha256sum -c SHA256SUMS
+        python3 - <<'META'
+        import json
+        from pathlib import Path
+        m=json.loads(Path('metadata.json').read_text())
+        assert m['version']=='v26.13.0' and m['arch']=='arm64'
+        assert m['patch']=='5da76859ef9272689a13a2669746d15391cde03a'
+        assert m['base']=='18b32a3b1552e199a01f1a8d9fd64aa756d3b75b'
+        assert Path('build-evidence/lief-patch-sha.txt').read_text().strip()==m['patch']
+        META
+        mkdir -p evidence
+        cp -r build-evidence evidence/build
+        cp metadata.json SHA256SUMS evidence/
+    - name: Install emulator and inspection tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends qemu-system-arm busybox-static cpio binutils strace
+        mkdir -p evidence payload/bin payload/proc payload/sys payload/dev payload/tmp
+        uname -a | tee evidence/host.txt
+        getconf PAGESIZE | tee -a evidence/host.txt
+        test "$(getconf PAGESIZE)" = 4096
+        qemu-system-aarch64 --version | tee -a evidence/host.txt
+    - name: Inspect all artifacts at target page size
+      run: |
+        set -uo pipefail
+        failed=0
+        for v in node official-node patched official; do
+          readelf -h -l -W payload/$v > evidence/$v.readelf.txt
+          python3 tools/sea-backport/check-elf.py payload/$v "$EXPECTED_PAGE" > evidence/$v.layout.json 2>&1
+          rc=$?
+          echo "$v layout_exit=$rc" | tee -a evidence/layout-status.txt
+          if [ "$v" != official ] && [ "$rc" != 0 ]; then failed=1; fi
+        done
+        # Defer failure until after execution so all empirical evidence is collected.
+        echo "$failed" > evidence/layout-failed
+    - name: Obtain distribution kernel
+      run: |
+        set -euxo pipefail
+        docker pull "$KERNEL_IMAGE"
+        docker image inspect "$KERNEL_IMAGE" > evidence/container-image.json
+        docker run --name kernel-source -e DEBIAN_FRONTEND=noninteractive "$KERNEL_IMAGE" \
+          sh -euxc 'apt-get update; apt-get install -y --no-install-recommends "$1"; dpkg-query -W' sh "$KERNEL_PACKAGE" \
+          2>&1 | tee evidence/kernel-packages.txt
+        mkdir kernel
+        docker cp kernel-source:/boot/. kernel/
+        kernel_path=$(find kernel -maxdepth 1 -name 'vmlinuz-*' | head -n 1)
+        test -n "$kernel_path"
+        cp "$kernel_path" vmlinuz
+        cp kernel/config-* evidence/
+        sha256sum vmlinuz | tee evidence/kernel-checksum.txt
+        if [ "$EXPECTED_PAGE" = 16384 ]; then
+          grep -H '^CONFIG_ARM64_16K_PAGES=y' evidence/config-*
+        else
+          grep -H '^CONFIG_ARM64_64K_PAGES=y' evidence/config-*
+        fi
+    - name: Assemble existing minimal system-emulation guest
+      run: |
+        set -euxo pipefail
+        cp /bin/busybox payload/bin/busybox
+        for applet in sh mount uname cat poweroff sync timeout dmesg tail grep sha256sum; do
+          ln -s busybox "payload/bin/$applet"
+        done
+        cp /usr/bin/getconf /usr/bin/strace /usr/bin/readelf payload/bin/
+        for executable in payload/node payload/official-node /usr/bin/getconf /usr/bin/strace /usr/bin/readelf; do
+          ldd "$executable" | tee -a evidence/shared-libraries.txt
+          while read -r library; do
+            cp --parents -L "$library" payload/
+          done < <(ldd "$executable" | awk '/=> \// {print $3} /^[[:space:]]*\// {print $1}')
+        done
+        printf '%s\n' "$EXPECTED_PAGE" > payload/expected-page
+        cp tools/sea-backport/run.sh payload/run.sh
+        cp tools/sea-backport/check-elf.cjs payload/check-elf.cjs
+        cat > payload/init <<'GUEST'
+        #!/bin/sh
+        export PATH=/bin
+        mount -t proc proc /proc
+        mount -t sysfs sysfs /sys
+        mount -t devtmpfs devtmpfs /dev
+        export EXPECTED_PAGE=$(cat /expected-page)
+        sh /run.sh
+        sync
+        poweroff -f
+        GUEST
+        chmod +x payload/init
+        (cd payload && find . -print0 | cpio --null -o --format=newc --owner=0:0 | gzip -1) > initramfs.cpio.gz
+    - name: Boot real distribution kernel and verify SEA
+      run: |
+        set -o pipefail
+        timeout 600 qemu-system-aarch64 \
+          -machine virt -cpu max -accel tcg -smp 2 -m 4096 \
+          -nographic -no-reboot -nic none \
+          -kernel vmlinuz -initrd initramfs.cpio.gz \
+          -append 'console=ttyAMA0 rdinit=/init panic=-1' \
+          2>&1 | tee evidence/guest-console.txt
+        grep -q '^SEA_BACKPORT_PASS' evidence/guest-console.txt
+        test "$(cat evidence/layout-failed)" = 0
+        grep -E 'PAGE_SIZE=|RESULT |NODE_EXIT=|GENERATE_EXIT=|NEGATIVE_CONTROL|SEA_BACKPORT_' evidence/guest-console.txt >> "$GITHUB_STEP_SUMMARY"
+    - if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: node-v26.13.0-linux-arm64-lief-5da7685-${{ matrix.page }}-evidence
+        path: evidence/
+        retention-days: 30
+        if-no-files-found: error
