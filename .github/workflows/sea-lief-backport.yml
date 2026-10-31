@@ -159,6 +159,7 @@ jobs:
         cp metadata.json SHA256SUMS evidence/
     - name: Inspect all artifacts at target page size
       run: |
+        set +e
         set -uo pipefail
         failed=0
         for v in node official-node patched official; do
@@ -259,6 +260,7 @@ jobs:
         qemu-system-aarch64 --version | tee -a evidence/host.txt
     - name: Inspect all artifacts at target page size
       run: |
+        set +e
         set -uo pipefail
         failed=0
         for v in node official-node patched official; do
