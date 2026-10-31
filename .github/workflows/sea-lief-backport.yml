@@ -133,6 +133,11 @@ jobs:
         sha256sum -c products.tar.gz.sha256
         tar -xzf products.tar.gz
         sha256sum -c SHA256SUMS
+        git diff 18b32a3b1552e199a01f1a8d9fd64aa756d3b75b HEAD -- deps/LIEF > expected-lief.diff
+        cmp expected-lief.diff build-evidence/backport.diff || {
+          echo 'ERROR: artifact LIEF implementation patch differs from this workflow revision'
+          exit 1
+        }
         python3 - <<'META'
         import json
         from pathlib import Path
@@ -212,6 +217,11 @@ jobs:
         sha256sum -c products.tar.gz.sha256
         tar -xzf products.tar.gz
         sha256sum -c SHA256SUMS
+        git diff 18b32a3b1552e199a01f1a8d9fd64aa756d3b75b HEAD -- deps/LIEF > expected-lief.diff
+        cmp expected-lief.diff build-evidence/backport.diff || {
+          echo 'ERROR: artifact LIEF implementation patch differs from this workflow revision'
+          exit 1
+        }
         python3 - <<'META'
         import json
         from pathlib import Path

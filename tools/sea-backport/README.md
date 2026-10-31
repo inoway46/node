@@ -60,7 +60,8 @@ missing or expired artifacts) fails verification; it never triggers a rebuild.
 
 Artifacts expire after 30 days (or earlier manual deletion). Verify-only checks
 the archive and every packaged file SHA256 and enforces the Node base SHA,
-version, arm64 architecture label, and exact LIEF patch SHA. The ELF inspector
+version, arm64 architecture label, exact LIEF patch SHA, and byte-for-byte
+backport diff equality against the verifier revision. The ELF inspector
 also verifies AArch64 machine type. SHA256 detects corruption; trust in the
 producer run and repository is still required. The artifact includes the build
 source SHA, build configuration, patch diff, logs, official and patched SEA, and
