@@ -119,8 +119,15 @@ jobs:
         fetch-depth: 0
     - name: Require explicit source run for verify-only
       if: inputs.mode == 'verify-only'
-      run: 'test -n "${{ inputs.source_run_id }}" || { echo ''ERROR: verify-only requires source_run_id; no automatic
-        rebuild''; exit 1; }'
+      env:
+        SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      run: |
+        case "$SOURCE_RUN_ID" in
+          ''|*[!0-9]*)
+            echo 'ERROR: verify-only requires a numeric source_run_id; no automatic rebuild'
+            exit 1
+            ;;
+        esac
     - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
       with:
         name: node-v26.13.0-linux-arm64-lief-5da7685
@@ -203,8 +210,15 @@ jobs:
         fetch-depth: 0
     - name: Require explicit source run for verify-only
       if: inputs.mode == 'verify-only'
-      run: 'test -n "${{ inputs.source_run_id }}" || { echo ''ERROR: verify-only requires source_run_id; no automatic
-        rebuild''; exit 1; }'
+      env:
+        SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      run: |
+        case "$SOURCE_RUN_ID" in
+          ''|*[!0-9]*)
+            echo 'ERROR: verify-only requires a numeric source_run_id; no automatic rebuild'
+            exit 1
+            ;;
+        esac
     - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
       with:
         name: node-v26.13.0-linux-arm64-lief-5da7685

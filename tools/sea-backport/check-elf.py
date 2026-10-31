@@ -22,4 +22,4 @@ for i, a in enumerate(loads):
         if max(a['va']//page, b['va']//page) < min((a['va']+a['memsz']+page-1)//page, (b['va']+b['memsz']+page-1)//page):
             errors.append(f"LOAD {a['index']}/{b['index']}: overlapping virtual pages")
 print(json.dumps(dict(path=path, page=page, loads=loads, errors=errors), indent=2))
-assert loads and not errors
+sys.exit(0 if loads and not errors else 1)
