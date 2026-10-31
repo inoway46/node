@@ -41,7 +41,7 @@ jobs:
         set -euxo pipefail
         mkdir -p build-evidence payload downloads
          git rev-parse HEAD > build-evidence/source-sha.txt
-         git diff v26.13.0 HEAD -- deps/LIEF > build-evidence/backport.diff
+         git diff 18b32a3b1552e199a01f1a8d9fd64aa756d3b75b HEAD -- deps/LIEF > build-evidence/backport.diff
         printf '%s\n' 5da76859ef9272689a13a2669746d15391cde03a > build-evidence/lief-patch-sha.txt
         printf '%s\n' 18b32a3b1552e199a01f1a8d9fd64aa756d3b75b > build-evidence/node-base-sha.txt
         uname -a > build-evidence/environment.txt
