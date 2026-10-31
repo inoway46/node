@@ -138,7 +138,7 @@ also retains `node-v26.13.0-linux-arm64-lief-5da7685-build-logs`. The final veri
 run retains three evidence artifacts with the same prefix and suffixes
 `-4096-evidence`, `-16384-evidence`, and `-65536-evidence`; their expiry is also
 2026-11-30. They contain readelf output, layout JSON, kernel provenance, SHA256
-validation logs, serial console execution/generation logs, exit codes and failed
+manifests, serial console execution/generation logs, exit codes and failed
 control execve traces, as appropriate to each environment.
 
 A concrete reuse command for these measured products is:
