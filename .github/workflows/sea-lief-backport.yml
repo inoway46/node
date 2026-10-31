@@ -35,7 +35,15 @@ jobs:
       with:
         persist-credentials: false
         fetch-depth: 0
-    - run: sudo apt-get update && sudo apt-get install -y clang-19 binutils ninja-build
+    - name: Install existing probe toolchain
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang-19 binutils ninja-build
+        rustup override set 1.88
+        rustc --version
+        nproc
+        free -h
+        df -h .
     - name: Build Node and generate both controls
       run: |
         set -euxo pipefail
@@ -49,7 +57,11 @@ jobs:
         ld.bfd --version >> build-evidence/environment.txt
         ./configure --ninja 2>&1 | tee build-evidence/configure.log
         cp config.gypi build-evidence/
-        ninja -C out/Release -j2 node 2>&1 | tee build-evidence/build.log
+        rustc --version >> build-evidence/environment.txt
+        nproc >> build-evidence/environment.txt
+        free -h >> build-evidence/environment.txt
+        ninja -C out/Release -t commands node > build-evidence/build-commands.txt
+        ninja -C out/Release -j4 node 2>&1 | tee build-evidence/build.log
         cp out/Release/node payload/node
         out/Release/node --version
         readelf -h -l -W out/Release/node > build-evidence/node.readelf.txt

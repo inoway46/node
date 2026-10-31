@@ -16,7 +16,8 @@ emulation from inoway46/LIEF run 41143675426 and GNU ld build conditions from
 inoway46/node run 41091181151. GNU ld produces the single BSS-like LOAD required
 by LIEF's existing BSS_END relocation; changing the linker is an explicit build
 condition, not a LIEF source fix. Builds are non-PIE with 64 KiB maximum/common
-linker page alignment. The official binary remains the negative control.
+linker page alignment. Rust 1.88 and four parallel compilation jobs match the
+existing source-build probe. The official binary remains the negative control.
 
 ## Build and reuse
 
