@@ -1,0 +1,84 @@
+name: Verify small ICU Temporal fix
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/fix-small-icu-temporal]
+
+permissions:
+  contents: read
+
+env:
+  CC: clang-19
+  CXX: clang++-19
+
+jobs:
+  small-icu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        phase: [before, after]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-19 libicu-dev pkg-config
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup override set 1.88.0
+      - name: Build and verify
+        env:
+          PHASE: ${{ matrix.phase }}
+          ICU: small-icu
+        run: |
+          cp .github/scripts/verify-small-icu.py "$RUNNER_TEMP/verify-small-icu.py"
+          python3 "$RUNNER_TEMP/verify-small-icu.py" "$PHASE" "$ICU"
+      - name: Save validation evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: icu-small-icu-${{ matrix.phase }}
+          path: ${{ runner.temp }}/icu-results/
+          if-no-files-found: error
+          retention-days: 14
+
+  other-icu:
+    needs: small-icu
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        phase: [before, after]
+        icu: [full-icu, system-icu]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-19 libicu-dev pkg-config
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup override set 1.88.0
+      - name: Build and verify
+        env:
+          PHASE: ${{ matrix.phase }}
+          ICU: ${{ matrix.icu }}
+        run: |
+          cp .github/scripts/verify-small-icu.py "$RUNNER_TEMP/verify-small-icu.py"
+          python3 "$RUNNER_TEMP/verify-small-icu.py" "$PHASE" "$ICU"
+      - name: Save validation evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: icu-${{ matrix.icu }}-${{ matrix.phase }}
+          path: ${{ runner.temp }}/icu-results/
+          if-no-files-found: error
+          retention-days: 14
