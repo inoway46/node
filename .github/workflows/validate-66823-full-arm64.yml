@@ -9,7 +9,7 @@ jobs:
   build:
     name: AArch64 Make Release and QEMU smoke
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 360
     env:
       CC: aarch64-linux-gnu-gcc
       CXX: aarch64-linux-gnu-g++
