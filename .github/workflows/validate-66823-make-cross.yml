@@ -1,7 +1,7 @@
 name: Validate 66823 Make cross builds
 on:
   push:
-    branches: [validate-66823-make-cross-20261021]
+    branches: [validate-66823-make-cross-20261101]
   workflow_dispatch:
 permissions:
   contents: read
@@ -27,8 +27,8 @@ jobs:
       - name: Fetch and verify fixed source revisions
         run: |
           set -euxo pipefail
-          before=697ecce05e7d72cf9278cae15278f51016d6e3b2
-          after=5ff420e05b794b8aac9d0cb07f1867a8f5463487
+          before=e0619bb7e39092f191685f156449f8783fe712f7
+          after=7f6b086b1ae6f2cb056ae1e2608301b438bbf182
           git fetch --no-tags --depth=2 https://github.com/inoway46/node.git "$after"
           test "$(git rev-parse "$after^")" = "$before"
           mkdir -p sources results
@@ -60,4 +60,4 @@ jobs:
         with:
           name: make-release-${{ matrix.arch }}
           path: results/
-          retention-days: 14
+          retention-days: 90

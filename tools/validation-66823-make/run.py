@@ -13,8 +13,8 @@ import subprocess
 import sys
 import tarfile
 
-BASE = '697ecce05e7d72cf9278cae15278f51016d6e3b2'
-HEAD = '5ff420e05b794b8aac9d0cb07f1867a8f5463487'
+BASE = 'e0619bb7e39092f191685f156449f8783fe712f7'
+HEAD = '7f6b086b1ae6f2cb056ae1e2608301b438bbf182'
 HOST = 'x86_64-unknown-linux-gnu'
 ARCHES = {
     'arm64': ('aarch64-unknown-linux-gnu', 'aarch64-linux-gnu', 'aarch64', 'AArch64'),
