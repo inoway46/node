@@ -1,0 +1,31 @@
+diff --git a/deps/crates/crates.gyp b/deps/crates/crates.gyp
+index 216b0cff512..02918c3c9d8 100644
+--- a/deps/crates/crates.gyp
++++ b/deps/crates/crates.gyp
+@@ -6,6 +6,7 @@
+     'zoneinfo64_dir': 'zoneinfo64-v0_3',
+     'temporal_zoneinfo64_data_output': '<(SHARED_INTERMEDIATE_DIR)/src/builtins/builtins-temporal-zoneinfo64-data.cc',
+     'cargo_rust_target%': '',
++    'node_shared_temporal_capi%': 'false',
+   },
+   'conditions': [
+     ['build_type == "Release"', {
+@@ -70,7 +71,7 @@
+         ],
+       },
+       'conditions': [
+-        ['OS=="win"', {
++        ['OS=="win" and node_shared_temporal_capi=="false"', {
+           'actions': [
+             {
+               'action_name': 'cargo_build',
+@@ -90,7 +91,8 @@
+               ],
+             }
+           ],
+-        }, {
++        }],
++        ['OS!="win" and node_shared_temporal_capi=="false"', {
+           'actions': [
+             {
+               'action_name': 'cargo_build',

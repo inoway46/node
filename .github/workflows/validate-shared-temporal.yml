@@ -1,0 +1,59 @@
+name: Validate shared Temporal Cargo guards
+on:
+  push:
+    branches: [validate-shared-temporal-20261102]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Prepare base and exact local change
+        run: |
+          set -euxo pipefail
+          base=e0619bb7e39092f191685f156449f8783fe712f7
+          mkdir results
+          git clone --no-checkout https://github.com/inoway46/node.git source
+          git -C source checkout --detach "$base"
+          git -C source apply --check ../tools/validation-shared-temporal/change.patch
+          git -C source apply ../tools/validation-shared-temporal/change.patch
+          git -C source diff > results/change.patch
+          git -C source rev-parse HEAD > results/base.txt
+      - name: Compare 36 before and after GYP configurations
+        working-directory: source
+        run: |
+          set -euxo pipefail
+          python3 ../tools/validation-shared-temporal/matrix.py | tee ../results/matrix.log
+      - name: Configure and generate timezone data without Cargo
+        working-directory: source
+        env:
+          CC: gcc
+          CXX: g++
+          CC_host: gcc
+          CXX_host: g++
+        run: |
+          set -euxo pipefail
+          mkdir -p ../no-cargo
+          printf '#!/bin/sh\necho "Unexpected Cargo invocation" >&2\nexit 99\n' > ../no-cargo/cargo
+          chmod +x ../no-cargo/cargo
+          export PATH="$PWD/../no-cargo:$PATH"
+          python3 ../tools/validation-shared-temporal/capture.py --dest-os=linux --dest-cpu=arm64 \
+            --cross-compiling --shared-temporal_capi --with-intl=none \
+            --v8-enable-temporal-support 2>&1 | tee ../results/configure.log
+          python3 ../tools/validation-shared-temporal/verify.py | tee ../results/graph-check.log
+          output="$PWD/out/Release/obj/gen/src/builtins/builtins-temporal-zoneinfo64-data.cc"
+          make -C out -f Makefile "$output" V=1 2>&1 | tee ../results/zone-build.log
+          test -s "$output"
+          grep -q zoneinfo64_static_data "$output"
+          printf 'PASS: timezone data generated without Cargo\n' | tee ../results/zone-result.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: shared-temporal-validation
+          path: results/
+          retention-days: 90
