@@ -28,7 +28,7 @@ jobs:
         run: |
           set -euxo pipefail
           before=e0619bb7e39092f191685f156449f8783fe712f7
-          after=7f6b086b1ae6f2cb056ae1e2608301b438bbf182
+          after=7378d0750c06994d98a3553bec8a4c040023beed
           git fetch --no-tags --depth=2 https://github.com/inoway46/node.git "$after"
           test "$(git rev-parse "$after^")" = "$before"
           mkdir -p sources results
