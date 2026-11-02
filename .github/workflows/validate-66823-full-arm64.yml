@@ -69,7 +69,7 @@ jobs:
         working-directory: source
         run: |
           set -euxo pipefail
-          make -j2 V=1 2>&1 | tee ../results/build.log
+          make -j4 V=1 2>&1 | tee ../results/build.log
           file out/Release/node | tee ../results/binary.txt
           readelf -h out/Release/node | tee ../results/node-elf.txt
           sha256sum out/Release/node > ../results/node.sha256
