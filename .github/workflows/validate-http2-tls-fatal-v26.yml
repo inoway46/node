@@ -12,7 +12,7 @@ jobs:
   compare:
     if: github.repository == 'inoway46/node'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 360
     env:
       CC: gcc-13
       CXX: g++-13
@@ -41,7 +41,7 @@ jobs:
         working-directory: source
         run: |
           set -o pipefail
-          nbld() { ./configure --ninja && ninja -C out/Release -j2; }
+          nbld() { ./configure --ninja && ninja -C out/Release -j4; }
           nbld 2>&1 | tee ../results/build-before.log
           out/Release/node -p 'JSON.stringify(process.versions)' > ../results/versions-before.json
           sha256sum out/Release/node > ../results/binary-before.sha256
@@ -61,7 +61,7 @@ jobs:
         working-directory: source
         run: |
           set -o pipefail
-          nbld() { ./configure --ninja && ninja -C out/Release -j2; }
+          nbld() { ./configure --ninja && ninja -C out/Release -j4; }
           nbld 2>&1 | tee ../results/build-after.log
           out/Release/node -p 'JSON.stringify(process.versions)' > ../results/versions-after.json
           sha256sum out/Release/node > ../results/binary-after.sha256
