@@ -1,0 +1,14 @@
+diff --git a/lib/internal/http2/core.js b/lib/internal/http2/core.js
+index 04acb5d30f6..6b9a2e39ade 100644
+--- a/lib/internal/http2/core.js
++++ b/lib/internal/http2/core.js
+@@ -3523,5 +3523,9 @@ function socketOnError(error) {
+       return session.destroy();
+     debugSessionObj(this, 'socket error [%s]', error.message);
+     session.destroy(error);
++    // TLS errors reported by the native handle leave established sockets open.
++    // Cancel writes that cannot complete after a fatal TLS error.
++    if (this instanceof tls.TLSSocket && this._hadError)
++      this.destroy();
+   }
+ }

@@ -1,0 +1,84 @@
+name: Validate HTTP2 TLS fatal cleanup on v26
+on:
+  workflow_dispatch:
+  push:
+    branches: [validate-http2-tls-fatal-v26]
+permissions:
+  contents: read
+concurrency:
+  group: http2-tls-fatal-v26-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  compare:
+    if: github.repository == 'inoway46/node'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CC: gcc-13
+      CXX: g++-13
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: validation
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: nodejs/node
+          ref: 18b32a3b1552e199a01f1a8d9fd64aa756d3b75b
+          path: source
+          persist-credentials: false
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y ninja-build gcc-13 g++-13
+      - name: Record inputs
+        run: |
+          mkdir -p results
+          git -C source rev-parse HEAD > results/source-sha.txt
+          git -C validation rev-parse HEAD > results/validation-sha.txt
+          sha256sum validation/.github/validation/http2-tls-fatal/socket-on-error.patch > results/patch-sha256.txt
+          uname -a > results/platform.txt
+          "$CXX" --version >> results/platform.txt
+      - name: Build baseline
+        working-directory: source
+        run: |
+          set -o pipefail
+          nbld() { ./configure --ninja && ninja -C out/Release -j2; }
+          nbld 2>&1 | tee ../results/build-before.log
+          out/Release/node -p 'JSON.stringify(process.versions)' > ../results/versions-before.json
+          sha256sum out/Release/node > ../results/binary-before.sha256
+      - name: Verify baseline
+        id: before
+        continue-on-error: true
+        run: python3 validation/.github/validation/http2-tls-fatal/run.py source before results
+      - name: Apply HTTP2 fix and regression test
+        working-directory: source
+        run: |
+          git apply --check ../validation/.github/validation/http2-tls-fatal/socket-on-error.patch
+          git apply ../validation/.github/validation/http2-tls-fatal/socket-on-error.patch
+          cp ../validation/.github/validation/http2-tls-fatal/test-http2-tls-fatal-alert.js test/parallel/
+          git diff --check
+          git diff > ../results/applied.patch
+      - name: Rebuild with fix
+        working-directory: source
+        run: |
+          set -o pipefail
+          nbld() { ./configure --ninja && ninja -C out/Release -j2; }
+          nbld 2>&1 | tee ../results/build-after.log
+          out/Release/node -p 'JSON.stringify(process.versions)' > ../results/versions-after.json
+          sha256sum out/Release/node > ../results/binary-after.sha256
+      - name: Verify patched binary
+        id: after
+        continue-on-error: true
+        run: python3 validation/.github/validation/http2-tls-fatal/run.py source after results
+      - name: Require both expected outcomes
+        if: always()
+        env:
+          BEFORE: ${{ steps.before.outcome }}
+          AFTER: ${{ steps.after.outcome }}
+        run: test "$BEFORE" = success && test "$AFTER" = success
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: http2-tls-fatal-v26-${{ github.run_id }}
+          path: results/
+          retention-days: 14
