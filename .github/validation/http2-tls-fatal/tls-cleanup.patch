@@ -1,0 +1,21 @@
+diff --git a/lib/internal/tls/wrap.js b/lib/internal/tls/wrap.js
+index 20f043e26c2..bde2de0456c 100644
+--- a/lib/internal/tls/wrap.js
++++ b/lib/internal/tls/wrap.js
+@@ -591,2 +591,4 @@ function onerror(err) {
+-    // Emit error
+-    owner._emitTLSError(err);
++    // A failed TLS connection cannot make progress on pending writes.
++    // Preserve connection details until the error has been handled.
++    owner._closeAfterHandlingError = true;
++    owner.destroy(err);
+diff --git a/lib/net.js b/lib/net.js
+index cbaa7ecb92b..51dda8a2a86 100644
+--- a/lib/net.js
++++ b/lib/net.js
+@@ -362 +361,0 @@ function closeSocketHandle(self, isException, isCleanupPending = false) {
+-      self.emit('close', isException);
+@@ -363,0 +363 @@ function closeSocketHandle(self, isException, isCleanupPending = false) {
++        // The handle is closed and must not be used by close listeners.
+@@ -367,0 +368 @@ function closeSocketHandle(self, isException, isCleanupPending = false) {
++      self.emit('close', isException);

@@ -1,4 +1,4 @@
-name: Validate HTTP2 TLS fatal cleanup on v26
+name: Validate TLS fatal cleanup on v26
 on:
   workflow_dispatch:
   push:
@@ -34,7 +34,9 @@ jobs:
           mkdir -p results
           git -C source rev-parse HEAD > results/source-sha.txt
           git -C validation rev-parse HEAD > results/validation-sha.txt
-          sha256sum validation/.github/validation/http2-tls-fatal/socket-on-error.patch > results/patch-sha256.txt
+          sha256sum validation/.github/validation/http2-tls-fatal/tls-cleanup.patch > results/patch-sha256.txt
+          printf "%s\n" "1bb1b8a3df10bfc53f0656621124f1f0e2b31fed" "87ce55b56f7ad50fb8ae1e25886e19851e54d011" > results/pr-commits.txt
+          sha256sum validation/.github/validation/http2-tls-fatal/test-*.js > results/tests-sha256.txt
           uname -a > results/platform.txt
           "$CXX" --version >> results/platform.txt
       - name: Build baseline
@@ -49,12 +51,12 @@ jobs:
         id: before
         continue-on-error: true
         run: python3 validation/.github/validation/http2-tls-fatal/run.py source before results
-      - name: Apply HTTP2 fix and regression test
+      - name: Apply net and TLS fixes
         working-directory: source
         run: |
-          git apply --check ../validation/.github/validation/http2-tls-fatal/socket-on-error.patch
-          git apply ../validation/.github/validation/http2-tls-fatal/socket-on-error.patch
-          cp ../validation/.github/validation/http2-tls-fatal/test-http2-tls-fatal-alert.js test/parallel/
+          git apply --unidiff-zero --check ../validation/.github/validation/http2-tls-fatal/tls-cleanup.patch
+          git apply --unidiff-zero ../validation/.github/validation/http2-tls-fatal/tls-cleanup.patch
+          cp ../validation/.github/validation/http2-tls-fatal/test-*.js test/parallel/
           git diff --check
           git diff > ../results/applied.patch
       - name: Rebuild with fix
@@ -69,12 +71,18 @@ jobs:
         id: after
         continue-on-error: true
         run: python3 validation/.github/validation/http2-tls-fatal/run.py source after results
+      - name: Run related tests
+        id: related
+        working-directory: source
+        run: |
+          python3 ../validation/.github/validation/http2-tls-fatal/related.py . ../results
       - name: Require both expected outcomes
         if: always()
         env:
           BEFORE: ${{ steps.before.outcome }}
           AFTER: ${{ steps.after.outcome }}
-        run: test "$BEFORE" = success && test "$AFTER" = success
+          RELATED: ${{ steps.related.outcome }}
+        run: test "$BEFORE" = success && test "$AFTER" = success && test "$RELATED" = success
       - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@v4
