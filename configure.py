@@ -3142,3 +3142,5 @@ if options.compile_commands_json and sys.platform == 'win32':
   os.path.isfile('./compile_commands.json') and os.unlink('./compile_commands.json')
   shutil.copy2('./out/' + config['BUILDTYPE'] + '/compile_commands.json', './compile_commands.json')
 info('configure completed successfully')
+
+# ci/v8-skip-miss: trivial change that alters the V8 derivation hash.
