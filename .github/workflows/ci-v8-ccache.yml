@@ -20,8 +20,9 @@ on:
       - ci/v8-ccache
   workflow_dispatch:
 
+# Per commit, so a "[warm-only]" push does not cancel cold jobs still running.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.sha }}
   cancel-in-progress: true
 
 permissions:
@@ -52,6 +53,7 @@ jobs:
 
   cold-aarch64-linux:
     needs: build-tarball
+    if: ${{ !contains(github.event.head_commit.message, '[warm-only]') }}
     name: 'aarch64-linux: cold'
     uses: $/.github/workflows/ci-v8-ccache-job.yml
     with:
@@ -61,7 +63,7 @@ jobs:
 
   warm-aarch64-linux:
     needs: cold-aarch64-linux
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (!contains(github.event.head_commit.message, '[warm-only]') || contains(github.event.head_commit.message, '[warm aarch64-linux]')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -75,6 +77,7 @@ jobs:
 
   cold-aarch64-darwin:
     needs: build-tarball
+    if: ${{ !contains(github.event.head_commit.message, '[warm-only]') }}
     name: 'aarch64-darwin: cold'
     uses: $/.github/workflows/ci-v8-ccache-job.yml
     with:
@@ -84,7 +87,7 @@ jobs:
 
   warm-aarch64-darwin:
     needs: cold-aarch64-darwin
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (!contains(github.event.head_commit.message, '[warm-only]') || contains(github.event.head_commit.message, '[warm aarch64-darwin]')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -98,6 +101,7 @@ jobs:
 
   cold-x86_64-darwin:
     needs: build-tarball
+    if: ${{ !contains(github.event.head_commit.message, '[warm-only]') }}
     name: 'x86_64-darwin: cold'
     uses: $/.github/workflows/ci-v8-ccache-job.yml
     with:
@@ -107,7 +111,7 @@ jobs:
 
   warm-x86_64-darwin:
     needs: cold-x86_64-darwin
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (!contains(github.event.head_commit.message, '[warm-only]') || contains(github.event.head_commit.message, '[warm x86_64-darwin]')) }}
     strategy:
       fail-fast: false
       matrix:
