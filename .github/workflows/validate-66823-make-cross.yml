@@ -1,7 +1,7 @@
 name: Validate 66823 Make cross builds
 on:
   push:
-    branches: [validate-66823-make-cross-20261101]
+    branches: [validate-66823-make-cross-20261106]
   workflow_dispatch:
 permissions:
   contents: read
@@ -28,7 +28,7 @@ jobs:
         run: |
           set -euxo pipefail
           before=e0619bb7e39092f191685f156449f8783fe712f7
-          after=7378d0750c06994d98a3553bec8a4c040023beed
+          after=6478586c3091488ff2483d3ee41f3da40934d9d6
           git fetch --no-tags --depth=2 https://github.com/inoway46/node.git "$after"
           test "$(git rev-parse "$after^")" = "$before"
           mkdir -p sources results

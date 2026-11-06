@@ -14,7 +14,7 @@ import sys
 import tarfile
 
 BASE = 'e0619bb7e39092f191685f156449f8783fe712f7'
-HEAD = '7378d0750c06994d98a3553bec8a4c040023beed'
+HEAD = '6478586c3091488ff2483d3ee41f3da40934d9d6'
 HOST = 'x86_64-unknown-linux-gnu'
 ARCHES = {
     'arm64': ('aarch64-unknown-linux-gnu', 'aarch64-linux-gnu', 'aarch64', 'AArch64'),
