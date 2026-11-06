@@ -1,0 +1,204 @@
+# Fork-only throwaway workflow (inoway46/node); not for upstream.
+# One phase of the V8 ccache experiment; called from ci-v8-ccache.yml.
+name: CI V8 ccache job
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        required: true
+        type: string
+      system:
+        required: true
+        type: string
+      phase:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CCACHE_HOST_DIR: /nix/var/cache/ccache
+
+jobs:
+  v8:
+    name: ${{ inputs.phase }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 358
+    env:
+      SYSTEM: ${{ inputs.system }}
+      PHASE: ${{ inputs.phase }}
+      CACHE_KEY: ccache-v8-${{ inputs.system }}-${{ github.run_id }}
+    steps:
+      - name: Record start time
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/ci-v8-ccache
+          path: experiment
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          path: tarballs
+          pattern: '*.tar.gz'
+          merge-multiple: true
+
+      - name: Extract tarball
+        shell: bash
+        run: |
+          tar xzf tarballs/*.tar.gz -C "$RUNNER_TEMP"
+          echo "TAR_DIR=$RUNNER_TEMP/$(basename tarballs/*.tar.gz .tar.gz)" >> "$GITHUB_ENV"
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b  # v31.11.3
+        with:
+          extra_nix_config: |
+            sandbox = true
+            extra-sandbox-paths = ${{ env.CCACHE_HOST_DIR }}
+
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866  # v17
+        with:
+          name: nodejs
+
+      - name: Create ccache dir writable by nixbld users
+        run: |
+          sudo install -d -m 0777 "$CCACHE_HOST_DIR"
+          ls -ld "$CCACHE_HOST_DIR"
+
+      - name: Restore ccache (warm phases only)
+        if: inputs.phase != 'cold'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ env.CCACHE_HOST_DIR }}
+          key: ${{ env.CACHE_KEY }}
+          fail-on-cache-miss: true
+
+      - name: Fix permissions after restore
+        run: |
+          sudo chmod -R a+rwX "$CCACHE_HOST_DIR"
+          du -sh "$CCACHE_HOST_DIR"
+
+      - name: Modify the tarball for this phase
+        run: |
+          case "$PHASE" in
+            cold) ;;
+            warm-trivial)
+              printf '\n# ccache experiment: trivial change that alters the V8 derivation hash.\n' >> "$TAR_DIR/configure.py" ;;
+            warm-pr66823)
+              patch -p1 -d "$TAR_DIR" < experiment/.github/ci-v8-ccache/pr66823.diff ;;
+          esac
+
+      - name: Evaluate derivations
+        run: |
+          NIX="experiment/.github/ci-v8-ccache/v8-ccache.nix"
+          eval_out() { nix-store -q --outputs "$(nix-instantiate "$NIX" --argstr tarDir "$1" -A "$2")"; }
+          # Reference: no-ccache V8 for the *unmodified* tarball (what upstream CI caches).
+          mkdir -p "$RUNNER_TEMP/orig"
+          tar xzf tarballs/*.tar.gz -C "$RUNNER_TEMP/orig"
+          ORIG_DIR="$RUNNER_TEMP/orig/$(basename "$TAR_DIR")"
+          REF_OUT=$(eval_out "$ORIG_DIR" plain)
+          PLAIN_OUT=$(eval_out "$TAR_DIR" plain)
+          CCACHE_OUT=$(eval_out "$TAR_DIR" ccache)
+          REF_NARINFO=$(curl -ISsw "%{http_code}" -o /dev/null "https://nodejs.cachix.org/$(basename "${REF_OUT%-v8-*}").narinfo")
+          PLAIN_NARINFO=$(curl -ISsw "%{http_code}" -o /dev/null "https://nodejs.cachix.org/$(basename "${PLAIN_OUT%-v8-*}").narinfo")
+          {
+            echo "NIX=$NIX"
+            echo "REF_OUT=$REF_OUT"
+            echo "REF_NARINFO=$REF_NARINFO"
+            echo "PLAIN_OUT=$PLAIN_OUT"
+            echo "PLAIN_NARINFO=$PLAIN_NARINFO"
+            echo "CCACHE_OUT=$CCACHE_OUT"
+          } | tee -a "$GITHUB_ENV" | sed 's/^/RESULT /'
+          echo "CCACHE_BIN=$(nix-build --no-out-link "$NIX" --argstr tarDir "$TAR_DIR" -A ccacheBin)/bin/ccache" >> "$GITHUB_ENV"
+
+      - name: Probe ccache inside the sandbox
+        run: |
+          stats() { env CCACHE_DIR="$CCACHE_HOST_DIR" CCACHE_UMASK=000 "$CCACHE_BIN" --print-stats | awk -v k="$1" '$1 == k { v = $2 } END { print v + 0 }'; }
+          env CCACHE_DIR="$CCACHE_HOST_DIR" CCACHE_UMASK=000 "$CCACHE_BIN" -z
+          nix-build --no-out-link "$NIX" --argstr tarDir "$TAR_DIR" -A probeA -L
+          nix-build --no-out-link "$NIX" --argstr tarDir "$TAR_DIR" -A probeB -L
+          hits=$(( $(stats direct_cache_hit) + $(stats preprocessed_cache_hit) ))
+          echo "RESULT probe hits=$hits misses=$(stats cache_miss)"
+          [ "$hits" -ge 1 ] || { echo "::error::ccache probe did not hit"; exit 1; }
+          env CCACHE_DIR="$CCACHE_HOST_DIR" CCACHE_UMASK=000 "$CCACHE_BIN" -z
+
+      - name: Build V8 with ccache
+        id: build
+        run: |
+          start=$(date +%s)
+          set +e
+          # Stop before the 6h job limit so the ccache dir is still saved.
+          perl -e 'alarm shift; exec @ARGV' $((320 * 60)) \
+            nix-build --no-out-link "$NIX" --argstr tarDir "$TAR_DIR" -A ccache -L > build.log 2>&1
+          status=$?
+          set -e
+          tail -n 40 build.log
+          echo "BUILD_MIN=$(( ($(date +%s) - start + 30) / 60 ))" >> "$GITHUB_ENV"
+          echo "BUILD_STATUS=$status" >> "$GITHUB_ENV"
+          exit "$status"
+
+      - name: ccache statistics
+        if: ${{ !cancelled() }}
+        run: |
+          sudo chmod -R a+rwX "$CCACHE_HOST_DIR"
+          env CCACHE_DIR="$CCACHE_HOST_DIR" CCACHE_UMASK=000 "$CCACHE_BIN" -s -v | tee ccache-stats.txt
+          env CCACHE_DIR="$CCACHE_HOST_DIR" CCACHE_UMASK=000 "$CCACHE_BIN" --print-stats > ccache-print-stats.txt
+          get() { awk -v k="$1" '$1 == k { v = $2 } END { print v + 0 }' ccache-print-stats.txt; }
+          hits=$(( $(get direct_cache_hit) + $(get preprocessed_cache_hit) ))
+          misses=$(get cache_miss)
+          rate=$(awk -v h="$hits" -v m="$misses" 'BEGIN { if (h + m) printf "%.1f", 100 * h / (h + m); else print "n/a" }')
+          size=$(du -sm "$CCACHE_HOST_DIR" | cut -f1)
+          echo "CCACHE_HITS=$hits" >> "$GITHUB_ENV"
+          echo "CCACHE_MISSES=$misses" >> "$GITHUB_ENV"
+          echo "CCACHE_RATE=$rate" >> "$GITHUB_ENV"
+          echo "CCACHE_MB=$size" >> "$GITHUB_ENV"
+          echo "RESULT ccache hits=$hits misses=$misses rate=$rate% dir=${size}MB"
+
+      - name: Compare with the no-ccache V8 from nodejs.cachix.org
+        if: steps.build.outcome == 'success'
+        run: |
+          if [ "$REF_NARINFO" != 200 ]; then
+            echo "RESULT compare skipped: reference not in cachix"
+            echo "COMPARE_RESULT=n/a (ref not cached)" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          nix-store -r "$REF_OUT" > /dev/null
+          python3 experiment/.github/ci-v8-ccache/manifest.py compare "$REF_OUT" "$CCACHE_OUT" | tee compare.txt
+          echo "COMPARE_RESULT=$(grep -o 'identical_content=[a-z]*' compare.txt | cut -d= -f2) ($(grep -o 'members_diff=[0-9]*' compare.txt | cut -d= -f2) members differ)" >> "$GITHUB_ENV"
+          du -sh "$CCACHE_OUT" "$REF_OUT"
+
+      - name: Save ccache (cold phase only)
+        if: ${{ always() && inputs.phase == 'cold' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ env.CCACHE_HOST_DIR }}
+          key: ${{ env.CACHE_KEY }}
+
+      - name: Summary
+        if: ${{ always() }}
+        run: |
+          job_min=$(( ($(date +%s) - JOB_START + 30) / 60 ))
+          line="| $SYSTEM | $PHASE | ${BUILD_MIN:-?} | $job_min | ${BUILD_STATUS:-?} | ${CCACHE_HITS:-?} / ${CCACHE_MISSES:-?} (${CCACHE_RATE:-?}%) | ${CCACHE_MB:-?} | ${COMPARE_RESULT:-?} |"
+          echo "RESULT-ROW $line"
+          {
+            echo "| system | phase | V8 build min | job min | exit | ccache hits / misses | ccache dir MB | same output as no-ccache build |"
+            echo "|---|---|---|---|---|---|---|---|"
+            echo "$line"
+            echo
+            echo "- ref (no ccache, unmodified): \`$REF_OUT\` narinfo $REF_NARINFO"
+            echo "- plain (no ccache, this phase): \`$PLAIN_OUT\` narinfo $PLAIN_NARINFO"
+            echo "- ccache (this phase): \`$CCACHE_OUT\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        if: ${{ always() }}
+        with:
+          name: logs-${{ inputs.system }}-${{ inputs.phase }}
+          retention-days: 7
+          path: |
+            build.log
+            ccache-stats.txt
+            compare.txt
+          if-no-files-found: ignore

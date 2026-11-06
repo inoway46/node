@@ -1,0 +1,120 @@
+# Fork-only throwaway workflow (inoway46/node); not for upstream.
+#
+# Prototype of "option 2": build the CI V8 derivation (tools/nix/ci-shell.nix
+# `v8Derivation`) with ccache inside the Nix sandbox, persisting the ccache
+# directory with actions/cache. Only V8 is built; Node.js is not built/tested.
+#
+#   cold:  empty ccache, unmodified tarball; saves ccache-v8-<system>-<run_id>
+#   warm-trivial:  restores it; configure.py gets a comment appended (new
+#                  derivation hash, same compile flags)
+#   warm-pr66823:  restores it; applies the configure.py/crates.gyp change of
+#                  nodejs/node#66823
+#
+# Every build is compared with the no-ccache V8 for the unmodified tarball,
+# substituted from nodejs.cachix.org.
+name: CI V8 ccache prototype
+
+on:
+  push:
+    branches:
+      - ci/v8-ccache
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-tarball:
+    name: Build slim tarball
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Make tarball
+        run: |
+          export DATESTRING=$(date "+%Y-%m-%d")
+          export COMMIT=$(git rev-parse --short=10 "$GITHUB_SHA")
+          ./configure && make tar -j4 SKIP_XZ=1 SKIP_SHARED_DEPS=1 GZIP_COMPRESSION=6
+        env:
+          DISTTYPE: nightly
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          path: '*.tar.gz'
+          archive: false
+
+  cold-aarch64-linux:
+    needs: build-tarball
+    name: 'aarch64-linux: cold'
+    uses: $/.github/workflows/ci-v8-ccache-job.yml
+    with:
+      runner: ubuntu-24.04-arm
+      system: aarch64-linux
+      phase: cold
+
+  warm-aarch64-linux:
+    needs: cold-aarch64-linux
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        phase: [warm-trivial, warm-pr66823]
+    name: 'aarch64-linux: ${{ matrix.phase }}'
+    uses: $/.github/workflows/ci-v8-ccache-job.yml
+    with:
+      runner: ubuntu-24.04-arm
+      system: aarch64-linux
+      phase: ${{ matrix.phase }}
+
+  cold-aarch64-darwin:
+    needs: build-tarball
+    name: 'aarch64-darwin: cold'
+    uses: $/.github/workflows/ci-v8-ccache-job.yml
+    with:
+      runner: macos-latest
+      system: aarch64-darwin
+      phase: cold
+
+  warm-aarch64-darwin:
+    needs: cold-aarch64-darwin
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        phase: [warm-trivial, warm-pr66823]
+    name: 'aarch64-darwin: ${{ matrix.phase }}'
+    uses: $/.github/workflows/ci-v8-ccache-job.yml
+    with:
+      runner: macos-latest
+      system: aarch64-darwin
+      phase: ${{ matrix.phase }}
+
+  cold-x86_64-darwin:
+    needs: build-tarball
+    name: 'x86_64-darwin: cold'
+    uses: $/.github/workflows/ci-v8-ccache-job.yml
+    with:
+      runner: macos-15-intel
+      system: x86_64-darwin
+      phase: cold
+
+  warm-x86_64-darwin:
+    needs: cold-x86_64-darwin
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        phase: [warm-trivial, warm-pr66823]
+    name: 'x86_64-darwin: ${{ matrix.phase }}'
+    uses: $/.github/workflows/ci-v8-ccache-job.yml
+    with:
+      runner: macos-15-intel
+      system: x86_64-darwin
+      phase: ${{ matrix.phase }}
