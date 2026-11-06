@@ -92,7 +92,13 @@ jobs:
             warm-trivial)
               printf '\n# ccache experiment: trivial change that alters the V8 derivation hash.\n' >> "$TAR_DIR/configure.py" ;;
             warm-pr66823)
-              patch -p1 -d "$TAR_DIR" < experiment/.github/ci-v8-ccache/pr66823.diff ;;
+              # The slim tarball may not contain every patched file (e.g. deps/crates).
+              PATCH="$PWD/experiment/.github/ci-v8-ccache/pr66823.diff"
+              excl=()
+              for f in $(sed -n 's|^+++ b/||p' "$PATCH"); do
+                [ -e "$TAR_DIR/$f" ] || { echo "RESULT patch: $f not in tarball, skipped"; excl+=(--exclude="$f"); }
+              done
+              (cd "$TAR_DIR" && git apply -v "${excl[@]}" "$PATCH") ;;
           esac
 
       - name: Evaluate derivations
