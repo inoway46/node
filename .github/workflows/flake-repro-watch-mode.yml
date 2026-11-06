@@ -1,0 +1,148 @@
+# Throwaway workflow for the inoway46/node fork only. Not part of any PR.
+#
+# Runs test/parallel/test-watch-mode-files_watcher.mjs many times, before and
+# after the deflake fix, under three modes:
+#   plain - normal parallelism, REPEAT runs
+#   load  - 4x oversubscribed with background CPU hogs, REPEAT runs
+#   delay - a module preloaded into the test that drops the events of every
+#           fs.watch() watcher for 500ms after it is created, which
+#           deterministically simulates a watcher (e.g. an FSEvents stream on
+#           macOS) that is not reporting changes yet. REPEAT_DELAY runs.
+#
+# Branch layout this relies on: HEAD = this workflow, HEAD~1 = the fix,
+# HEAD~2 = upstream main (the "before" version of the test).
+name: Flake repro (watch-mode-files_watcher)
+
+on:
+  push:
+    branches:
+      - ci/flake-repro-watch-mode
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NODE_NIGHTLY: v28.0.0-nightly20261106ec4d4c2950
+  REPEAT: 1000
+  REPEAT_DELAY: 100
+  TARGET: test/parallel/test-watch-mode-files_watcher.mjs
+
+jobs:
+  repro:
+    name: ${{ matrix.os }} / ${{ matrix.variant }} / ${{ matrix.mode }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        variant: [before, after]
+        mode: [plain, load, delay]
+    env:
+      VARIANT: ${{ matrix.variant }}
+      MODE: ${{ matrix.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+
+      - name: Download Node.js nightly
+        run: |
+          case "$RUNNER_OS" in
+            macOS) file="node-${NODE_NIGHTLY}-darwin-arm64.tar.gz" ;;
+            Linux) file="node-${NODE_NIGHTLY}-linux-x64.tar.xz" ;;
+          esac
+          base="https://nodejs.org/download/nightly/${NODE_NIGHTLY}"
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "$base/$file"
+          curl -fsSL "$base/SHASUMS256.txt" | grep "  ${file}\$" > SHASUMS256.txt
+          shasum -a 256 -c SHASUMS256.txt
+          mkdir node
+          tar -xf "$file" -C node --strip-components=1
+          echo "NODE_BIN=$RUNNER_TEMP/node/bin/node" >> "$GITHUB_ENV"
+          node/bin/node --version
+
+      - name: Prepare test file
+        run: |
+          if [ "$VARIANT" = before ]; then
+            git show "HEAD~2:$TARGET" > "$TARGET"
+          fi
+          if [ "$MODE" = delay ]; then
+            cat > "$RUNNER_TEMP/watch-delay.mjs" <<'EOF'
+          import fs from 'node:fs';
+          import { performance } from 'node:perf_hooks';
+          const originalWatch = fs.watch;
+          fs.watch = function watch(...args) {
+            const watcher = originalWatch.apply(this, args);
+            const createdAt = performance.now();
+            const emit = watcher.emit;
+            watcher.emit = function(event, ...rest) {
+              if (event === 'change' && performance.now() - createdAt < 500) return false;
+              return emit.call(this, event, ...rest);
+            };
+            return watcher;
+          };
+          EOF
+            # Preload it with --import (via the Flags comment read by
+            # tools/test.py). An import statement in the test itself would be
+            # too late: builtin modules imported by the test are loaded while
+            # linking, before any module body runs, so files_watcher would
+            # already have captured the original fs.watch.
+            DELAY_MODULE="$RUNNER_TEMP/watch-delay.mjs" perl -0pi -e \
+              's{\A(// Flags: [^\n]*)}{$1 --import=$ENV{DELAY_MODULE}} or die "Flags line not found\n"' "$TARGET"
+          fi
+          if grep -q appendInterval "$TARGET"; then actual=after; else actual=before; fi
+          [ "$actual" = "$VARIANT" ] || { echo "expected $VARIANT, got $actual"; exit 1; }
+          git diff -- "$TARGET"
+
+      - name: Start background CPU load
+        if: matrix.mode == 'load'
+        run: |
+          n=$(getconf _NPROCESSORS_ONLN)
+          for _ in $(seq $((n * 2))); do
+            nohup yes > /dev/null 2>&1 &
+          done
+          echo "started $((n * 2)) CPU hogs on $n cores"
+
+      - name: Run test
+        run: |
+          n=$(getconf _NPROCESSORS_ONLN)
+          jobs=$n
+          repeat=$REPEAT
+          timeout=120
+          if [ "$MODE" = load ]; then jobs=$((n * 4)); fi
+          if [ "$MODE" = delay ]; then
+            # The hung runs are idle, so oversubscribe and use a shorter
+            # timeout (tools/test.py multiplies it by 3 on arm64).
+            jobs=$((n * 4))
+            repeat=$REPEAT_DELAY
+            timeout=20
+          fi
+          set +e
+          python3 tools/test.py --shell="$NODE_BIN" --repeat="$repeat" -j "$jobs" -t "$timeout" -p tap "$TARGET" > result.tap 2>&1
+          status=$?
+          set -e
+          pass=$(grep -c '^ok ' result.tap || true)
+          fail=$(grep -c '^not ok ' result.tap || true)
+          {
+            echo "| os | variant | mode | jobs | runs | pass | fail |"
+            echo "|---|---|---|---|---|---|---|"
+            echo "| ${{ matrix.os }} | $VARIANT | $MODE | $jobs | $repeat | $pass | $fail |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "pass=$pass fail=$fail (exit $status)"
+          if [ "$fail" -gt 0 ]; then
+            echo "::group::First failure"
+            awk '/^not ok /{p=1} p{print; if (++c > 40) exit}' result.tap
+            echo "::endgroup::"
+          fi
+          exit "$status"
+
+      - name: Upload TAP log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: tap-${{ matrix.os }}-${{ matrix.variant }}-${{ matrix.mode }}
+          path: result.tap
+          retention-days: 7
