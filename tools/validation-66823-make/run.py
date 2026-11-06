@@ -16,10 +16,18 @@ import tarfile
 BASE = 'e0619bb7e39092f191685f156449f8783fe712f7'
 HEAD = '6478586c3091488ff2483d3ee41f3da40934d9d6'
 HOST = 'x86_64-unknown-linux-gnu'
+X86_64_MACHINE = 'Advanced Micro Devices X86-64'
 ARCHES = {
     'arm64': ('aarch64-unknown-linux-gnu', 'aarch64-linux-gnu', 'aarch64', 'AArch64'),
     'riscv64': ('riscv64gc-unknown-linux-gnu', 'riscv64-linux-gnu', 'riscv64', 'RISC-V'),
+    'arm': ('armv7-unknown-linux-gnueabihf', 'arm-linux-gnueabihf', 'arm', 'ARM'),
 }
+# Host tools for 32-bit targets are built with a 32-bit host compiler, as in
+# the Node.js armv7 cross-compiler setup (CC_host="gcc -m32").
+HOST_TOOLCHAINS = {
+    'arm': ('i686-unknown-linux-gnu', ['-m32'], 'Intel 80386'),
+}
+DEFAULT_HOST_TOOLCHAIN = (HOST, [], X86_64_MACHINE)
 PROBE = '''#include "PlainDate.h"
 int main(void) {
   temporal_rs_PlainDate_try_new_result date =
@@ -57,6 +65,8 @@ class Validation:
     def __init__(self, args):
         self.arch = args.arch
         self.triple, self.prefix, self.qemu_arch, self.machine = ARCHES[args.arch]
+        self.host_triple, self.host_flags, self.host_machine = HOST_TOOLCHAINS.get(
+            args.arch, DEFAULT_HOST_TOOLCHAIN)
         self.output = args.output.resolve()
         self.output.mkdir(parents=True, exist_ok=True)
         self.work = args.work.resolve()
@@ -69,7 +79,8 @@ class Validation:
             self.env.pop(key, None)
         self.env.update({
             'LC_ALL': 'C', 'CC': self.prefix + '-gcc', 'CXX': self.prefix + '-g++',
-            'AR': self.prefix + '-ar', 'CC_host': 'gcc', 'CXX_host': 'g++',
+            'AR': self.prefix + '-ar', 'CC_host': shlex.join(['gcc', *self.host_flags]),
+            'CXX_host': shlex.join(['g++', *self.host_flags]),
             'AR_host': 'ar', 'CARGO_BUILD_TARGET': self.triple,
             'CARGO_BUILD_JOBS': '2', 'RUSTUP_TOOLCHAIN': '1.88.0',
             'CARGO_TARGET_' + self.triple.upper().replace('-', '_') + '_LINKER':
@@ -77,6 +88,7 @@ class Validation:
         })
         self.env.update({key + '_target': self.env[key] for key in ('CC', 'CXX', 'AR')})
         self.results = {'base': BASE, 'head': HEAD, 'arch': args.arch,
+                        'host_triple': self.host_triple,
                         'profile': 'Release', 'generator': 'Make',
                         'pr66804_included': False, 'commands': {}, 'cases': {}}
         self.probe = self.output / 'ffi.c'
@@ -115,10 +127,10 @@ class Validation:
                 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
 
     def link(self, label, source, archive, host, expected_failure=None):
-        compiler = 'gcc' if host else self.prefix + '-gcc'
+        compiler = ['gcc', *self.host_flags] if host else [self.prefix + '-gcc']
         exe = self.work / label
         flags = ['-march=rv64gc', '-mabi=lp64d'] if not host and self.arch == 'riscv64' else []
-        self.run(label, [compiler, *flags, '-std=c11', '-I',
+        self.run(label, [*compiler, *flags, '-std=c11', '-I',
                         source / 'deps/crates/vendor/temporal_capi-v0_2/bindings/c',
                         self.probe, archive, '-ldl', '-lpthread', '-lm', '-lrt',
                         '-lutil', '-o', exe], source, expected_failure)
@@ -175,7 +187,7 @@ class Validation:
                                             for action in value.get('actions', [])
                                             for path in action.get('outputs', []))
             for toolset, value in rust.items():
-                triple = HOST if toolset == 'host' else self.triple
+                triple = self.host_triple if toolset == 'host' else self.triple
                 action = value['actions'][0]
                 require(action['action'][action['action'].index('--target') + 1] == triple,
                         'Incorrect Cargo target')
@@ -194,7 +206,7 @@ class Validation:
                 path = Path(filename)
                 require(path.is_file(), f'Declared output missing: {path}')
                 host = toolset == 'host'
-                machine = 'Advanced Micro Devices X86-64' if host else self.machine
+                machine = self.host_machine if host else self.machine
                 result['archives'][toolset] = self.inspect_archive('after-' + toolset,
                                                                    path, machine)
                 self.link('after-' + toolset, source, path, host)
@@ -210,10 +222,12 @@ class Validation:
         self.case('after')
         self.results['outcome'] = 'PASS: expected baseline failures and fixed archive/FFI success'
         self.save()
+        host = f'`{self.host_triple}` (CC_host="{self.env["CC_host"]}")'
         summary = (f'### Make / Release / {self.arch}\n\n'
                    f'- Before: `{BASE}` — expected missing archive and host link failures reproduced.\n'
-                   f'- After: `{HEAD}` — separate host/target archives, correct ELF architectures, '
-                   'Temporal FFI links and native/QEMU execution passed; incremental build was a no-op.\n'
+                   f'- After: `{HEAD}` — separate host {host} and target `{self.triple}` '
+                   'archives, correct ELF architectures, Temporal FFI links and native/QEMU '
+                   'execution passed; incremental build was a no-op.\n'
                    '- #66804 excluded. Full Node.js build and Ninja are outside this validation.\n')
         (self.output / 'summary.md').write_text(summary)
         if os.environ.get('GITHUB_STEP_SUMMARY'):

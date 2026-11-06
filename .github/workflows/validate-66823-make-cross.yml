@@ -20,6 +20,12 @@ jobs:
           - arch: riscv64
             triple: riscv64gc-unknown-linux-gnu
             compiler: riscv64-linux-gnu
+          # 32-bit target with 32-bit host tools (CC_host="gcc -m32").
+          - arch: arm
+            triple: armv7-unknown-linux-gnueabihf
+            compiler: arm-linux-gnueabihf
+            host_triple: i686-unknown-linux-gnu
+            host_packages: libc6-dev-i386 lib32gcc-13-dev
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -43,11 +49,16 @@ jobs:
         env:
           CROSS_COMPILER: ${{ matrix.compiler }}
           RUST_TARGET: ${{ matrix.triple }}
+          RUST_HOST_TARGET: ${{ matrix.host_triple }}
+          HOST_PACKAGES: ${{ matrix.host_packages }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y "gcc-$CROSS_COMPILER" "g++-$CROSS_COMPILER" qemu-user
+          # --no-remove: fail instead of silently replacing the cross compiler
+          # if the 32-bit host libraries conflict with it.
+          sudo apt-get install -y --no-remove "gcc-$CROSS_COMPILER" "g++-$CROSS_COMPILER" \
+            qemu-user $HOST_PACKAGES
           rustup toolchain install 1.88.0 --profile minimal
-          rustup target add --toolchain 1.88.0 "$RUST_TARGET"
+          rustup target add --toolchain 1.88.0 "$RUST_TARGET" $RUST_HOST_TARGET
       - name: Compare Make archives and Temporal FFI
         env:
           TARGET_ARCH: ${{ matrix.arch }}
