@@ -1,0 +1,99 @@
+# Experiment only (not for upstream): run parallel/test-watch-mode-files_watcher
+# many times on macOS before and after the deflake fix.
+#
+# - stress: the real test, 5 shards x 4 workers x 50 runs = 1000 runs per
+#   variant, from a directory with unusual characters and with CPU load.
+# - inject: the test with a preload that drops fs.watch events for 500ms after
+#   each watcher is created, to show deterministically which variant hangs.
+name: Repro test-watch-mode-files_watcher
+
+on:
+  push:
+    branches:
+      - repro/watch-mode-files-watcher
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NODE_NIGHTLY: v28.0.0-nightly20261106ec4d4c2950
+  NODE_SHA256: dc9703e8fbc4f1f5fd47a569a26db79cf33f7ade25118cbbd331aa1f3bebf45f
+  DIR: dir%20with $unusual"chars?'åß∂ƒ©∆¬…`
+
+jobs:
+  run:
+    name: ${{ matrix.mode }} / ${{ matrix.variant }} / ${{ matrix.shard }}
+    runs-on: macos-15
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [stress]
+        variant: [before, after]
+        shard: [1, 2, 3, 4, 5]
+        include:
+          - mode: inject
+            variant: before
+            shard: 1
+          - mode: inject
+            variant: after
+            shard: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download Node.js nightly
+        working-directory: ${{ runner.temp }}
+        run: |
+          tarball="node-$NODE_NIGHTLY-darwin-arm64.tar.gz"
+          curl -fsSLO "https://nodejs.org/download/nightly/$NODE_NIGHTLY/$tarball"
+          echo "$NODE_SHA256  $tarball" | shasum -a 256 -c -
+          tar xzf "$tarball"
+          echo "NODE=$RUNNER_TEMP/node-$NODE_NIGHTLY-darwin-arm64/bin/node" >> "$GITHUB_ENV"
+
+      - name: Prepare test directory
+        run: |
+          "$NODE" -v
+          sysctl -n hw.ncpu
+          root="$RUNNER_TEMP/$DIR"
+          mkdir -p "$root/test/parallel" "$root/test/fixtures"
+          cp -R test/common "$root/test/"
+          cp -R test/fixtures/watch-mode "$root/test/fixtures/"
+          if [ "${{ matrix.variant }}" = before ]; then
+            cp .github/repro-watch-mode/before.mjs "$root/test/parallel/test-watch-mode-files_watcher.mjs"
+          else
+            cp test/parallel/test-watch-mode-files_watcher.mjs "$root/test/parallel/"
+          fi
+          cp .github/repro-watch-mode/inject.mjs "$RUNNER_TEMP/inject.mjs"
+          cp .github/repro-watch-mode/stress.sh "$RUNNER_TEMP/stress.sh"
+          echo "ROOT=$root" >> "$GITHUB_ENV"
+
+      - name: Run test
+        run: |
+          if [ "${{ matrix.mode }}" = inject ]; then
+            export NODE_OPTIONS="--import=$RUNNER_TEMP/inject.mjs"
+            workers=4 iterations=5 burners=0
+          else
+            workers=4 iterations=50 burners=2
+          fi
+          cd "$ROOT"
+          status=0
+          bash "$RUNNER_TEMP/stress.sh" "$NODE" test/parallel/test-watch-mode-files_watcher.mjs \
+            "$workers" "$iterations" 120 "$burners" "$RUNNER_TEMP/logs" || status=$?
+          {
+            echo "### ${{ matrix.mode }} / ${{ matrix.variant }} / shard ${{ matrix.shard }}"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/logs/summary.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        if: always()
+        with:
+          name: logs-${{ matrix.mode }}-${{ matrix.variant }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/logs
+          if-no-files-found: ignore
