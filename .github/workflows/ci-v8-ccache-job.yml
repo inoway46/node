@@ -58,14 +58,15 @@ jobs:
             sandbox = true
             extra-sandbox-paths = ${{ env.CCACHE_HOST_DIR }}
 
-      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866  # v17
-        with:
-          name: nodejs
-
       - name: Create ccache dir writable by nixbld users
+        # Must exist before the first build (extra-sandbox-paths).
         run: |
           sudo install -d -m 0777 "$CCACHE_HOST_DIR"
           ls -ld "$CCACHE_HOST_DIR"
+
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866  # v17
+        with:
+          name: nodejs
 
       - name: Restore ccache (warm phases only)
         if: inputs.phase != 'cold'
@@ -140,7 +141,7 @@ jobs:
           exit "$status"
 
       - name: ccache statistics
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && env.CCACHE_BIN != '' }}
         run: |
           sudo chmod -R a+rwX "$CCACHE_HOST_DIR"
           env CCACHE_DIR="$CCACHE_HOST_DIR" CCACHE_UMASK=000 "$CCACHE_BIN" -s -v | tee ccache-stats.txt
