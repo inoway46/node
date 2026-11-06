@@ -118,8 +118,8 @@ jobs:
         run: |
           stats() { env CCACHE_DIR="$CCACHE_HOST_DIR" CCACHE_UMASK=000 "$CCACHE_BIN" --print-stats | awk -v k="$1" '$1 == k { v = $2 } END { print v + 0 }'; }
           env CCACHE_DIR="$CCACHE_HOST_DIR" CCACHE_UMASK=000 "$CCACHE_BIN" -z
-          nix-build --no-out-link "$NIX" --argstr tarDir "$TAR_DIR" -A probeA -L
-          nix-build --no-out-link "$NIX" --argstr tarDir "$TAR_DIR" -A probeB -L
+          nix-build --no-out-link "$NIX" --argstr tarDir "$TAR_DIR" -A probeA
+          nix-build --no-out-link "$NIX" --argstr tarDir "$TAR_DIR" -A probeB
           hits=$(( $(stats direct_cache_hit) + $(stats preprocessed_cache_hit) ))
           echo "RESULT probe hits=$hits misses=$(stats cache_miss)"
           [ "$hits" -ge 1 ] || { echo "::error::ccache probe did not hit"; exit 1; }
@@ -132,7 +132,7 @@ jobs:
           set +e
           # Stop before the 6h job limit so the ccache dir is still saved.
           perl -e 'alarm shift; exec @ARGV' $((320 * 60)) \
-            nix-build --no-out-link "$NIX" --argstr tarDir "$TAR_DIR" -A ccache -L > build.log 2>&1
+            nix-build --no-out-link "$NIX" --argstr tarDir "$TAR_DIR" -A ccache > build.log 2>&1
           status=$?
           set -e
           tail -n 40 build.log
