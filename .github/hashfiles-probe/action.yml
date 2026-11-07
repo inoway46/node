@@ -1,0 +1,7 @@
+name: Observe expression reevaluation
+description: Fork-only probe of the real runner main and post environment.
+runs:
+  using: node24
+  main: probe.cjs
+  post: probe.cjs
+  post-if: always()
