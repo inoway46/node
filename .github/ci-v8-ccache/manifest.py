@@ -3,7 +3,8 @@
 """Compare two V8 derivation outputs file by file, and static archives member
 by member (member data only, so archive headers/timestamps are ignored).
 
-Usage: manifest.py compare <store-path-a> <store-path-b>
+Usage: manifest.py compare <store-path-a> <store-path-b> [extract-dir]
+With extract-dir, differing members are written to extract-dir/{a,b}/.
 lib/pkgconfig is skipped because v8.pc embeds $out.
 """
 import hashlib
@@ -11,7 +12,7 @@ import os
 import sys
 
 
-def ar_members(data):
+def ar_members(data, keep=False):
   if not data.startswith(b'!<arch>\n'):
     return None
   pos, longnames, members = 8, b'', []
@@ -37,7 +38,7 @@ def ar_members(data):
       name = name.rstrip('/')
     if name.startswith('__.SYMDEF'):
       continue  # symbol table: depends on member sizes only
-    members.append((name, hashlib.sha256(body).hexdigest()))
+    members.append((name, hashlib.sha256(body).hexdigest()) + ((body,) if keep else ()))
   return members
 
 
@@ -55,7 +56,18 @@ def manifest(root):
   return files
 
 
-def compare(a, b):
+def extract(root, rel, names, out):
+  with open(os.path.join(root, rel), 'rb') as f:
+    members = ar_members(f.read(), keep=True)
+  for i, (n, _, body) in enumerate(members):
+    if n in names:
+      path = os.path.join(out, rel.replace('/', '_'), f'{i:04d}-{n}')
+      os.makedirs(os.path.dirname(path), exist_ok=True)
+      with open(path, 'wb') as f:
+        f.write(body)
+
+
+def compare(a, b, out=None):
   ma, mb = manifest(a), manifest(b)
   only = sorted(set(ma) ^ set(mb))
   same_files = diff_files = 0
@@ -77,6 +89,9 @@ def compare(a, b):
       else:
         bad = [n for (n, x), (_, y) in zip(ama, amb) if x != y]
         members_diff += len(bad)
+        if out and bad:
+          extract(a, rel, set(bad), os.path.join(out, 'a'))
+          extract(b, rel, set(bad), os.path.join(out, 'b'))
         details.append(f'{rel}: {len(bad)}/{len(ama)} members differ'
                        + (f' e.g. {", ".join(bad[:5])}' if bad else ' (headers only)'))
     else:
@@ -94,6 +109,6 @@ def compare(a, b):
 
 
 if __name__ == '__main__':
-  if len(sys.argv) != 4 or sys.argv[1] != 'compare':
+  if len(sys.argv) not in (4, 5) or sys.argv[1] != 'compare':
     sys.exit(__doc__)
-  compare(sys.argv[2], sys.argv[3])
+  compare(*sys.argv[2:])

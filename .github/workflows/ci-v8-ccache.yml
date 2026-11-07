@@ -122,3 +122,79 @@ jobs:
       runner: macos-15-intel
       system: x86_64-darwin
       phase: ${{ matrix.phase }}
+
+  # No ccache: rebuild the V8 that nodejs.cachix.org has and let Nix compare.
+  plain-check-aarch64-darwin:
+    needs: build-tarball
+    if: ${{ contains(github.event.head_commit.message, '[plain-check aarch64-darwin]') }}
+    name: 'aarch64-darwin: plain-check'
+    uses: $/.github/workflows/ci-v8-ccache-job.yml
+    with:
+      runner: macos-latest
+      system: aarch64-darwin
+      phase: plain-check
+
+  # ccache build with -g0 (gyp adds -gdwarf-2 on macOS; the output is stripped anyway).
+  cold-g0-aarch64-darwin:
+    needs: build-tarball
+    if: ${{ contains(github.event.head_commit.message, '[g0 aarch64-darwin]') }}
+    name: 'aarch64-darwin: cold (g0)'
+    uses: $/.github/workflows/ci-v8-ccache-job.yml
+    with:
+      runner: macos-latest
+      system: aarch64-darwin
+      phase: cold
+      variant: g0
+
+  warm-g0-aarch64-darwin:
+    needs: cold-g0-aarch64-darwin
+    if: ${{ !cancelled() && contains(github.event.head_commit.message, '[g0 aarch64-darwin]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        phase: [warm-trivial, warm-pr66823]
+    name: 'aarch64-darwin: ${{ matrix.phase }} (g0)'
+    uses: $/.github/workflows/ci-v8-ccache-job.yml
+    with:
+      runner: macos-latest
+      system: aarch64-darwin
+      phase: ${{ matrix.phase }}
+      variant: g0
+
+  # No ccache: rebuild the V8 that nodejs.cachix.org has and let Nix compare.
+  plain-check-x86_64-darwin:
+    needs: build-tarball
+    if: ${{ contains(github.event.head_commit.message, '[plain-check x86_64-darwin]') }}
+    name: 'x86_64-darwin: plain-check'
+    uses: $/.github/workflows/ci-v8-ccache-job.yml
+    with:
+      runner: macos-15-intel
+      system: x86_64-darwin
+      phase: plain-check
+
+  # ccache build with -g0 (gyp adds -gdwarf-2 on macOS; the output is stripped anyway).
+  cold-g0-x86_64-darwin:
+    needs: build-tarball
+    if: ${{ contains(github.event.head_commit.message, '[g0 x86_64-darwin]') }}
+    name: 'x86_64-darwin: cold (g0)'
+    uses: $/.github/workflows/ci-v8-ccache-job.yml
+    with:
+      runner: macos-15-intel
+      system: x86_64-darwin
+      phase: cold
+      variant: g0
+
+  warm-g0-x86_64-darwin:
+    needs: cold-g0-x86_64-darwin
+    if: ${{ !cancelled() && contains(github.event.head_commit.message, '[g0 x86_64-darwin]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        phase: [warm-trivial, warm-pr66823]
+    name: 'x86_64-darwin: ${{ matrix.phase }} (g0)'
+    uses: $/.github/workflows/ci-v8-ccache-job.yml
+    with:
+      runner: macos-15-intel
+      system: x86_64-darwin
+      phase: ${{ matrix.phase }}
+      variant: g0
