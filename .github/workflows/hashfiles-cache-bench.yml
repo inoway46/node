@@ -1,8 +1,6 @@
 # Fork-only experiment; not for upstream.
 name: HashFiles cache benchmark
 on:
-  push:
-    branches: [codex/hashfiles-cache-bench]
   workflow_dispatch:
 permissions:
   contents: read

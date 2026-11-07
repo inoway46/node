@@ -1,0 +1,219 @@
+# Fork-only experiment; not for upstream.
+# Copied lint-js-and-md; run release-version validation as on a PR to main.
+# Cache namespaces control cold/warm state; lint commands are unchanged.
+name: Full lint hashFiles benchmark
+on:
+  push:
+    branches: [codex/hashfiles-cache-bench]
+    paths:
+      - .github/workflows/hashfiles-full-lint.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  PYTHON_VERSION: '3.15'
+  NODE_VERSION: lts/*
+jobs:
+  seed:
+    runs-on: ubuntu-slim
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        id: setup-node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            tools/doc/package-lock.json
+            tools/eslint/package-lock.json
+            tools/lint-md/package-lock.json
+      - name: Cache ESLint results
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        env:
+          # ESLint only invalidates its cache on config changes, so the key also
+          # covers the custom rules and the files they read.
+          cache-prefix: eslint-${{ runner.os }}-${{ steps.setup-node.outputs.node-version }}-${{ hashFiles('eslint.config.mjs', '*/eslint.config_partial.mjs', 'tools/eslint/*', 'tools/eslint-rules/**', 'doc/api/errors.md', 'doc/api/deprecations.md') }}
+        with:
+          path: .eslintcache
+          key: hashbench-${{ github.run_id }}-${{ env.cache-prefix }}-seed
+          restore-keys: hashbench-${{ github.run_id }}-${{ env.cache-prefix }}-seed
+      - name: Lint JavaScript files
+        run: |
+          set +e
+          NODE=$(command -v node) make lint-js ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+          EXIT_CODE="$?"
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo
+            echo 'ERROR: The JavaScript lint validation failed (the errors are logged above).'
+            echo '       Please fix the lint errors.'
+            if NODE=$(command -v node) make lint-js-fix > /dev/null 2>&1; then
+              echo '       Run:'
+              echo '          make lint-js-fix'
+              echo '       to fix the lint issues.'
+              git --no-pager diff
+            elif git diff --quiet --exit-code; then
+              echo '       None of the issue is auto-fixable, so manual fixes for'
+              echo '       all of the issues are required.'
+            else
+              echo '       Run:'
+              echo '          make lint-js-fix'
+              echo '       to fix the auto-fixable lint issues.'
+              echo '       Note that some manual fixes are also required.'
+            fi
+            echo
+            exit "$EXIT_CODE"
+          fi
+      - name: Get release version numbers
+        id: get-released-versions
+        run: ./tools/lint-md/list-released-versions-from-changelogs.mjs >> $GITHUB_OUTPUT
+      - name: Lint markdown files
+        run: |
+          echo "::add-matcher::.github/workflows/remark-lint-problem-matcher.json"
+          NODE=$(command -v node) make lint-md ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+        env:
+          NODE_RELEASED_VERSIONS: ${{ steps.get-released-versions.outputs.NODE_RELEASED_VERSIONS }}
+
+  before:
+    needs: seed
+    runs-on: ubuntu-slim
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        cache: [warm, cold]
+        replica: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        id: setup-node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            tools/doc/package-lock.json
+            tools/eslint/package-lock.json
+            tools/lint-md/package-lock.json
+      - name: Cache ESLint results
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        env:
+          # ESLint only invalidates its cache on config changes, so the key also
+          # covers the custom rules and the files they read.
+          cache-prefix: eslint-${{ runner.os }}-${{ steps.setup-node.outputs.node-version }}-${{ hashFiles('eslint.config.mjs', '*/eslint.config_partial.mjs', 'tools/eslint/*', 'tools/eslint-rules/**', 'doc/api/errors.md', 'doc/api/deprecations.md') }}
+        with:
+          path: .eslintcache
+          key: hashbench-${{ github.run_id }}-${{ env.cache-prefix }}-before-${{ matrix.cache }}-${{ matrix.replica }}
+          restore-keys: hashbench-${{ github.run_id }}-${{ env.cache-prefix }}-${{ matrix.cache == 'warm' && 'seed' || 'intentionally-missing' }}
+      - name: Lint JavaScript files
+        run: |
+          set +e
+          NODE=$(command -v node) make lint-js ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+          EXIT_CODE="$?"
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo
+            echo 'ERROR: The JavaScript lint validation failed (the errors are logged above).'
+            echo '       Please fix the lint errors.'
+            if NODE=$(command -v node) make lint-js-fix > /dev/null 2>&1; then
+              echo '       Run:'
+              echo '          make lint-js-fix'
+              echo '       to fix the lint issues.'
+              git --no-pager diff
+            elif git diff --quiet --exit-code; then
+              echo '       None of the issue is auto-fixable, so manual fixes for'
+              echo '       all of the issues are required.'
+            else
+              echo '       Run:'
+              echo '          make lint-js-fix'
+              echo '       to fix the auto-fixable lint issues.'
+              echo '       Note that some manual fixes are also required.'
+            fi
+            echo
+            exit "$EXIT_CODE"
+          fi
+      - name: Get release version numbers
+        id: get-released-versions
+        run: ./tools/lint-md/list-released-versions-from-changelogs.mjs >> $GITHUB_OUTPUT
+      - name: Lint markdown files
+        run: |
+          echo "::add-matcher::.github/workflows/remark-lint-problem-matcher.json"
+          NODE=$(command -v node) make lint-md ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+        env:
+          NODE_RELEASED_VERSIONS: ${{ steps.get-released-versions.outputs.NODE_RELEASED_VERSIONS }}
+
+  after:
+    needs: seed
+    runs-on: ubuntu-slim
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        cache: [warm, cold]
+        replica: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        id: setup-node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            tools/doc/package-lock.json
+            tools/eslint/package-lock.json
+            tools/lint-md/package-lock.json
+      - name: Cache ESLint results
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        env:
+          # ESLint only invalidates its cache on config changes, so the key also
+          # covers the custom rules and the files they read.
+          cache-prefix: eslint-${{ runner.os }}-${{ steps.setup-node.outputs.node-version }}-${{ hashFiles('eslint.config.mjs', '*/eslint.config_partial.mjs', 'tools/eslint/*', 'tools/eslint-rules/**', 'doc/api/errors.md', 'doc/api/deprecations.md', '!**/node_modules/**') }}
+        with:
+          path: .eslintcache
+          key: hashbench-${{ github.run_id }}-${{ env.cache-prefix }}-after-${{ matrix.cache }}-${{ matrix.replica }}
+          restore-keys: hashbench-${{ github.run_id }}-${{ env.cache-prefix }}-${{ matrix.cache == 'warm' && 'seed' || 'intentionally-missing' }}
+      - name: Lint JavaScript files
+        run: |
+          set +e
+          NODE=$(command -v node) make lint-js ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+          EXIT_CODE="$?"
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo
+            echo 'ERROR: The JavaScript lint validation failed (the errors are logged above).'
+            echo '       Please fix the lint errors.'
+            if NODE=$(command -v node) make lint-js-fix > /dev/null 2>&1; then
+              echo '       Run:'
+              echo '          make lint-js-fix'
+              echo '       to fix the lint issues.'
+              git --no-pager diff
+            elif git diff --quiet --exit-code; then
+              echo '       None of the issue is auto-fixable, so manual fixes for'
+              echo '       all of the issues are required.'
+            else
+              echo '       Run:'
+              echo '          make lint-js-fix'
+              echo '       to fix the auto-fixable lint issues.'
+              echo '       Note that some manual fixes are also required.'
+            fi
+            echo
+            exit "$EXIT_CODE"
+          fi
+      - name: Get release version numbers
+        id: get-released-versions
+        run: ./tools/lint-md/list-released-versions-from-changelogs.mjs >> $GITHUB_OUTPUT
+      - name: Lint markdown files
+        run: |
+          echo "::add-matcher::.github/workflows/remark-lint-problem-matcher.json"
+          NODE=$(command -v node) make lint-md ESLINT_CACHE_FLAGS='--cache --cache-strategy content'
+        env:
+          NODE_RELEASED_VERSIONS: ${{ steps.get-released-versions.outputs.NODE_RELEASED_VERSIONS }}
+
