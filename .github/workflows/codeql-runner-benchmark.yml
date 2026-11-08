@@ -1,0 +1,64 @@
+name: Compare CodeQL runners
+
+on:
+  push:
+    branches: [codeql-runner-benchmark]
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    if: github.repository == 'inoway46/node'
+    name: Analyze (${{ matrix.runner }}, ${{ matrix.language }}, ${{ matrix.trial }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      max-parallel: 18
+      matrix:
+        runner: [ubuntu-slim, ubuntu-latest]
+        language: [cpp, javascript, python]
+        trial: [1]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: nodejs/node
+          ref: ae353ec38d57385e8b06cc14521ef75718cdd86c
+          persist-credentials: false
+
+      - name: Record environment
+        run: |
+          git rev-parse HEAD
+          uname -a
+          cat /etc/os-release
+          nproc
+          free -m
+          df -h .
+          gcc --version
+          python3 --version
+          node --version
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370  # v4.39.1
+        with:
+          languages: ${{ matrix.language }}
+          config-file: ./.github/codeql-config.yml
+          tools: https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.27.4/codeql-bundle-linux64.tar.zst
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@9b3254085494b55a0f7c4c2b3d2d52cc712ce370  # v4.39.1
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370  # v4.39.1
+        with:
+          category: /language:${{ matrix.language }}/runner:${{ matrix.runner }}
+          upload: never
+          upload-database: false
