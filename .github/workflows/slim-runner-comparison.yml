@@ -1,0 +1,665 @@
+name: Compare slim runners (five jobs)
+on:
+  push:
+    branches:
+      - slim-runner-comparison
+permissions:
+  contents: read
+concurrency:
+  group: slim-runner-comparison
+  cancel-in-progress: false
+env:
+  NODE_VERSION: 26.13.0
+  PYTHON_VERSION: 3.15.0
+jobs:
+  build-docs-1:
+    if: ${{ !cancelled() && github.repository == 'inoway46/node' }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          repository: nodejs/node
+          ref: ae353ec38d57385e8b06cc14521ef75718cdd86c
+      - name: Record benchmark source and runner
+        run: |
+          git rev-parse HEAD
+          nproc
+          uname -a
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Build
+        run: NODE=$(command -v node) make doc-only
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: build-docs-1-${{ matrix.runner }}
+          path: out/doc
+          retention-days: 1
+      - name: Test
+        run: NODE=$(command -v node) make test-doc-ci TEST_CI_ARGS="-p actions --measure-flakiness 9"
+    name: build-docs / ${{ matrix.runner }} / round 1
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-slim
+          - ubuntu-latest
+  build-tarball-1:
+    if: ${{ !cancelled() && github.repository == 'inoway46/node' }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          repository: nodejs/node
+          ref: ae353ec38d57385e8b06cc14521ef75718cdd86c
+      - name: Record benchmark source and runner
+        run: |
+          git rev-parse HEAD
+          nproc
+          uname -a
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
+      - name: Make tarball
+        run: |
+          export DISTTYPE=nightly
+          export DATESTRING=2026-11-08
+          export COMMIT=$(git rev-parse --short=10 HEAD)
+          ./configure && make tar -j4 SKIP_XZ=1 GZIP_COMPRESSION=6
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          path: '*.tar.gz'
+          archive: false
+          name: build-tarball-1-${{ matrix.runner }}
+          retention-days: 1
+    name: build-tarball / ${{ matrix.runner }} / round 1
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-slim
+          - ubuntu-latest
+  shared-tarball-1:
+    if: ${{ !cancelled() && github.repository == 'inoway46/node' }}
+    name: shared-tarball / ${{ matrix.runner }} / round 1
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          repository: nodejs/node
+          ref: ae353ec38d57385e8b06cc14521ef75718cdd86c
+      - name: Record benchmark source and runner
+        run: |
+          git rev-parse HEAD
+          nproc
+          uname -a
+      - name: Make tarball
+        run: |
+          export DATESTRING=2026-11-08
+          export COMMIT=$(git rev-parse --short=10 HEAD)
+          ./configure && make tar -j4 SKIP_XZ=1 SKIP_SHARED_DEPS=1 GZIP_COMPRESSION=6
+        env:
+          DISTTYPE: nightly
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          path: '*.tar.gz'
+          archive: false
+          name: shared-tarball-1-${{ matrix.runner }}
+          retention-days: 1
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-slim
+          - ubuntu-latest
+  lint-cpp-1:
+    if: ${{ !cancelled() && github.repository == 'inoway46/node' }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            /*
+            !/deps/openssl/
+            !/deps/v8/
+          sparse-checkout-cone-mode: false
+          repository: nodejs/node
+          ref: ae353ec38d57385e8b06cc14521ef75718cdd86c
+      - name: Record benchmark source and runner
+        run: |
+          git rev-parse HEAD
+          nproc
+          uname -a
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
+      - name: Lint C/C++ files
+        run: make lint-cpp
+    name: lint-cpp / ${{ matrix.runner }} / round 1
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-slim
+          - ubuntu-latest
+  format-cpp-1:
+    if: ${{ !cancelled() && github.repository == 'inoway46/node' }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+          repository: nodejs/node
+          ref: ae353ec38d57385e8b06cc14521ef75718cdd86c
+      - name: Record benchmark source and runner
+        run: |
+          git rev-parse HEAD
+          nproc
+          uname -a
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
+      - name: Format C/C++ files
+        run: |
+          make format-cpp-build
+          # The `make format-cpp` error code is intentionally ignored here
+          # because it is irrelevant. We already check if the formatter produced
+          # a diff in the next line.
+          # Refs: https://github.com/nodejs/node/pull/42764
+          CLANG_FORMAT_START=HEAD~2 \
+            make format-cpp || true
+          git --no-pager diff --exit-code && EXIT_CODE="$?" || EXIT_CODE="$?"
+          if [ "$EXIT_CODE" != "0" ]
+          then
+            echo
+            echo 'ERROR: Please run:'
+            echo
+            echo "  CLANG_FORMAT_START="$\(git merge-base HEAD ${GITHUB_BASE_REF}\)" make format-cpp"
+            echo
+            echo 'to format the commits in your branch.'
+            exit "$EXIT_CODE"
+          fi
+    name: format-cpp / ${{ matrix.runner }} / round 1
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-slim
+          - ubuntu-latest
+  build-docs-2:
+    if: ${{ !cancelled() && github.repository == 'inoway46/node' }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          repository: nodejs/node
+          ref: ae353ec38d57385e8b06cc14521ef75718cdd86c
+      - name: Record benchmark source and runner
+        run: |
+          git rev-parse HEAD
+          nproc
+          uname -a
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Build
+        run: NODE=$(command -v node) make doc-only
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: build-docs-2-${{ matrix.runner }}
+          path: out/doc
+          retention-days: 1
+      - name: Test
+        run: NODE=$(command -v node) make test-doc-ci TEST_CI_ARGS="-p actions --measure-flakiness 9"
+    name: build-docs / ${{ matrix.runner }} / round 2
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-slim
+          - ubuntu-latest
+    needs:
+      - build-docs-1
+      - build-tarball-1
+      - shared-tarball-1
+      - lint-cpp-1
+      - format-cpp-1
+  build-tarball-2:
+    if: ${{ !cancelled() && github.repository == 'inoway46/node' }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          repository: nodejs/node
+          ref: ae353ec38d57385e8b06cc14521ef75718cdd86c
+      - name: Record benchmark source and runner
+        run: |
+          git rev-parse HEAD
+          nproc
+          uname -a
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
+      - name: Make tarball
+        run: |
+          export DISTTYPE=nightly
+          export DATESTRING=2026-11-08
+          export COMMIT=$(git rev-parse --short=10 HEAD)
+          ./configure && make tar -j4 SKIP_XZ=1 GZIP_COMPRESSION=6
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          path: '*.tar.gz'
+          archive: false
+          name: build-tarball-2-${{ matrix.runner }}
+          retention-days: 1
+    name: build-tarball / ${{ matrix.runner }} / round 2
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-slim
+          - ubuntu-latest
+    needs:
+      - build-docs-1
+      - build-tarball-1
+      - shared-tarball-1
+      - lint-cpp-1
+      - format-cpp-1
+  shared-tarball-2:
+    if: ${{ !cancelled() && github.repository == 'inoway46/node' }}
+    name: shared-tarball / ${{ matrix.runner }} / round 2
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          repository: nodejs/node
+          ref: ae353ec38d57385e8b06cc14521ef75718cdd86c
+      - name: Record benchmark source and runner
+        run: |
+          git rev-parse HEAD
+          nproc
+          uname -a
+      - name: Make tarball
+        run: |
+          export DATESTRING=2026-11-08
+          export COMMIT=$(git rev-parse --short=10 HEAD)
+          ./configure && make tar -j4 SKIP_XZ=1 SKIP_SHARED_DEPS=1 GZIP_COMPRESSION=6
+        env:
+          DISTTYPE: nightly
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          path: '*.tar.gz'
+          archive: false
+          name: shared-tarball-2-${{ matrix.runner }}
+          retention-days: 1
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-slim
+          - ubuntu-latest
+    needs:
+      - build-docs-1
+      - build-tarball-1
+      - shared-tarball-1
+      - lint-cpp-1
+      - format-cpp-1
+  lint-cpp-2:
+    if: ${{ !cancelled() && github.repository == 'inoway46/node' }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            /*
+            !/deps/openssl/
+            !/deps/v8/
+          sparse-checkout-cone-mode: false
+          repository: nodejs/node
+          ref: ae353ec38d57385e8b06cc14521ef75718cdd86c
+      - name: Record benchmark source and runner
+        run: |
+          git rev-parse HEAD
+          nproc
+          uname -a
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
+      - name: Lint C/C++ files
+        run: make lint-cpp
+    name: lint-cpp / ${{ matrix.runner }} / round 2
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-slim
+          - ubuntu-latest
+    needs:
+      - build-docs-1
+      - build-tarball-1
+      - shared-tarball-1
+      - lint-cpp-1
+      - format-cpp-1
+  format-cpp-2:
+    if: ${{ !cancelled() && github.repository == 'inoway46/node' }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+          repository: nodejs/node
+          ref: ae353ec38d57385e8b06cc14521ef75718cdd86c
+      - name: Record benchmark source and runner
+        run: |
+          git rev-parse HEAD
+          nproc
+          uname -a
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
+      - name: Format C/C++ files
+        run: |
+          make format-cpp-build
+          # The `make format-cpp` error code is intentionally ignored here
+          # because it is irrelevant. We already check if the formatter produced
+          # a diff in the next line.
+          # Refs: https://github.com/nodejs/node/pull/42764
+          CLANG_FORMAT_START=HEAD~2 \
+            make format-cpp || true
+          git --no-pager diff --exit-code && EXIT_CODE="$?" || EXIT_CODE="$?"
+          if [ "$EXIT_CODE" != "0" ]
+          then
+            echo
+            echo 'ERROR: Please run:'
+            echo
+            echo "  CLANG_FORMAT_START="$\(git merge-base HEAD ${GITHUB_BASE_REF}\)" make format-cpp"
+            echo
+            echo 'to format the commits in your branch.'
+            exit "$EXIT_CODE"
+          fi
+    name: format-cpp / ${{ matrix.runner }} / round 2
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-slim
+          - ubuntu-latest
+    needs:
+      - build-docs-1
+      - build-tarball-1
+      - shared-tarball-1
+      - lint-cpp-1
+      - format-cpp-1
+  build-docs-3:
+    if: ${{ !cancelled() && github.repository == 'inoway46/node' }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          repository: nodejs/node
+          ref: ae353ec38d57385e8b06cc14521ef75718cdd86c
+      - name: Record benchmark source and runner
+        run: |
+          git rev-parse HEAD
+          nproc
+          uname -a
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Build
+        run: NODE=$(command -v node) make doc-only
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: build-docs-3-${{ matrix.runner }}
+          path: out/doc
+          retention-days: 1
+      - name: Test
+        run: NODE=$(command -v node) make test-doc-ci TEST_CI_ARGS="-p actions --measure-flakiness 9"
+    name: build-docs / ${{ matrix.runner }} / round 3
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-slim
+          - ubuntu-latest
+    needs:
+      - build-docs-2
+      - build-tarball-2
+      - shared-tarball-2
+      - lint-cpp-2
+      - format-cpp-2
+  build-tarball-3:
+    if: ${{ !cancelled() && github.repository == 'inoway46/node' }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          repository: nodejs/node
+          ref: ae353ec38d57385e8b06cc14521ef75718cdd86c
+      - name: Record benchmark source and runner
+        run: |
+          git rev-parse HEAD
+          nproc
+          uname -a
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
+      - name: Make tarball
+        run: |
+          export DISTTYPE=nightly
+          export DATESTRING=2026-11-08
+          export COMMIT=$(git rev-parse --short=10 HEAD)
+          ./configure && make tar -j4 SKIP_XZ=1 GZIP_COMPRESSION=6
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          path: '*.tar.gz'
+          archive: false
+          name: build-tarball-3-${{ matrix.runner }}
+          retention-days: 1
+    name: build-tarball / ${{ matrix.runner }} / round 3
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-slim
+          - ubuntu-latest
+    needs:
+      - build-docs-2
+      - build-tarball-2
+      - shared-tarball-2
+      - lint-cpp-2
+      - format-cpp-2
+  shared-tarball-3:
+    if: ${{ !cancelled() && github.repository == 'inoway46/node' }}
+    name: shared-tarball / ${{ matrix.runner }} / round 3
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          repository: nodejs/node
+          ref: ae353ec38d57385e8b06cc14521ef75718cdd86c
+      - name: Record benchmark source and runner
+        run: |
+          git rev-parse HEAD
+          nproc
+          uname -a
+      - name: Make tarball
+        run: |
+          export DATESTRING=2026-11-08
+          export COMMIT=$(git rev-parse --short=10 HEAD)
+          ./configure && make tar -j4 SKIP_XZ=1 SKIP_SHARED_DEPS=1 GZIP_COMPRESSION=6
+        env:
+          DISTTYPE: nightly
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          path: '*.tar.gz'
+          archive: false
+          name: shared-tarball-3-${{ matrix.runner }}
+          retention-days: 1
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-slim
+          - ubuntu-latest
+    needs:
+      - build-docs-2
+      - build-tarball-2
+      - shared-tarball-2
+      - lint-cpp-2
+      - format-cpp-2
+  lint-cpp-3:
+    if: ${{ !cancelled() && github.repository == 'inoway46/node' }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            /*
+            !/deps/openssl/
+            !/deps/v8/
+          sparse-checkout-cone-mode: false
+          repository: nodejs/node
+          ref: ae353ec38d57385e8b06cc14521ef75718cdd86c
+      - name: Record benchmark source and runner
+        run: |
+          git rev-parse HEAD
+          nproc
+          uname -a
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
+      - name: Lint C/C++ files
+        run: make lint-cpp
+    name: lint-cpp / ${{ matrix.runner }} / round 3
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-slim
+          - ubuntu-latest
+    needs:
+      - build-docs-2
+      - build-tarball-2
+      - shared-tarball-2
+      - lint-cpp-2
+      - format-cpp-2
+  format-cpp-3:
+    if: ${{ !cancelled() && github.repository == 'inoway46/node' }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+          repository: nodejs/node
+          ref: ae353ec38d57385e8b06cc14521ef75718cdd86c
+      - name: Record benchmark source and runner
+        run: |
+          git rev-parse HEAD
+          nproc
+          uname -a
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
+      - name: Format C/C++ files
+        run: |
+          make format-cpp-build
+          # The `make format-cpp` error code is intentionally ignored here
+          # because it is irrelevant. We already check if the formatter produced
+          # a diff in the next line.
+          # Refs: https://github.com/nodejs/node/pull/42764
+          CLANG_FORMAT_START=HEAD~2 \
+            make format-cpp || true
+          git --no-pager diff --exit-code && EXIT_CODE="$?" || EXIT_CODE="$?"
+          if [ "$EXIT_CODE" != "0" ]
+          then
+            echo
+            echo 'ERROR: Please run:'
+            echo
+            echo "  CLANG_FORMAT_START="$\(git merge-base HEAD ${GITHUB_BASE_REF}\)" make format-cpp"
+            echo
+            echo 'to format the commits in your branch.'
+            exit "$EXIT_CODE"
+          fi
+    name: format-cpp / ${{ matrix.runner }} / round 3
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-slim
+          - ubuntu-latest
+    needs:
+      - build-docs-2
+      - build-tarball-2
+      - shared-tarball-2
+      - lint-cpp-2
+      - format-cpp-2
