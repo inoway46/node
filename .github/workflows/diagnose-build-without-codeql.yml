@@ -1,0 +1,69 @@
+name: Diagnose build without CodeQL
+
+on:
+  push:
+    branches: [diagnose-build-without-codeql]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.repository == 'inoway46/node'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: nodejs/node
+          ref: ae353ec38d57385e8b06cc14521ef75718cdd86c
+          persist-credentials: false
+
+      - name: Record environment
+        run: |
+          git rev-parse HEAD
+          uname -a
+          cat /etc/os-release
+          nproc
+          free -m
+          df -h .
+          gcc --version
+          python3 --version
+          node --version
+
+      - name: Build Node.js with resource monitoring
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            while true; do
+              date -u '+Resource sample: %Y-%m-%dT%H:%M:%SZ'
+              uptime
+              free -m
+              df -h .
+              ps -eo pid,ppid,comm,rss,%cpu --sort=-rss | head -n 16 || true
+              for metric in memory.current memory.peak memory.max memory.events; do
+                if [ -r "/sys/fs/cgroup/$metric" ]; then
+                  echo "$metric"
+                  cat "/sys/fs/cgroup/$metric"
+                fi
+              done
+              sleep 60
+            done
+          ) > >(tee resources.log) 2>&1 &
+          monitor_pid=$!
+          trap 'kill "$monitor_pid" 2>/dev/null || true; wait "$monitor_pid" 2>/dev/null || true' EXIT
+          ./configure 2>&1 | tee configure.log
+          make -j4 2>&1 | tee build.log
+          ./out/Release/node --version
+
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-without-codeql-logs
+          path: |
+            configure.log
+            build.log
+            resources.log
