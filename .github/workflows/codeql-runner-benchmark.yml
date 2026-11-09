@@ -22,7 +22,7 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        runner: [ubuntu-24.04]
+        runner: [ubuntu-latest]
         language: [cpp]
         trial: [1]
 
@@ -57,9 +57,45 @@ jobs:
       - name: Build Node.js
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
+          python3 -u - <<'PY' &
+          import datetime
+          import pathlib
+          import subprocess
+          import time
+
+          with open("resources.log", "w", buffering=1) as log:
+              while True:
+                  parts = ["Resource sample: " + datetime.datetime.now(datetime.timezone.utc).isoformat()]
+                  for command in (
+                      ["uptime"],
+                      ["free", "-m"],
+                      ["df", "-h", ".", "/tmp"],
+                      ["ps", "-eo", "pid,ppid,comm,rss,%cpu", "--sort=-rss"],
+                  ):
+                      try:
+                          result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+                          output = result.stdout + result.stderr
+                          if command[0] == "ps":
+                              output = "\n".join(output.splitlines()[:16]) + "\n"
+                          parts.append(output)
+                      except Exception as error:
+                          parts.append(str(error))
+                  for metric in ("memory.current", "memory.peak", "memory.max", "memory.events"):
+                      path = pathlib.Path("/sys/fs/cgroup") / metric
+                      try:
+                          parts.append(metric + ":\n" + path.read_text())
+                      except OSError:
+                          pass
+                  sample = "\n".join(parts)
+                  print(sample, flush=True)
+                  log.write(sample + "\n")
+                  time.sleep(60)
+          PY
+          monitor_pid=$!
+          trap 'kill "$monitor_pid" 2>/dev/null || true; wait "$monitor_pid" 2>/dev/null || true' EXIT
           ./configure 2>&1 | tee configure.log
-          make -j4 2>&1 | tee build.log
+          make -j2 2>&1 | tee build.log
 
       - name: Upload build logs
         if: always()
@@ -69,6 +105,7 @@ jobs:
           path: |
             configure.log
             build.log
+            resources.log
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370  # v4.39.1
