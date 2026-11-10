@@ -2103,7 +2103,7 @@ JsonString JsonParser<Char>::ScanJsonString(bool needs_internalization) {
 
   // SIMD constants for one-byte string scanning, hoisted out of the loop.
   // Only used in the sizeof(Char)==1 path; dead-store-eliminated for two-byte.
-  [[maybe_unused]] hw::FixedTag<uint8_t, 16> tag;
+  [[maybe_unused]] hw::CappedTag<uint8_t, 16> tag;
   [[maybe_unused]] const size_t stride = hw::Lanes(tag);
   [[maybe_unused]] const auto mask_0x20 = hw::Set(tag, 0x20);
   [[maybe_unused]] const auto mask_quote = hw::Set(tag, '"');

@@ -49,9 +49,7 @@ MutablePage::MutablePage(Heap* heap, BaseSpace* space, size_t chunk_size,
   // This assert is merely necessary but not sufficient to guarantee that the
   // fields sit on the same cacheline as the metadata object itself is
   // dynamically allocated without alignment restrictions.
-  static_assert(
-      kOffsetOfFirstFastField / std::hardware_destructive_interference_size ==
-      kOffsetOfLastFastField / std::hardware_destructive_interference_size);
+  static_assert(kOffsetOfFirstFastField / 64 == kOffsetOfLastFastField / 64);
 }
 
 // static
