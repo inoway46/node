@@ -27,6 +27,14 @@ on:
         required: false
         type: boolean
         default: false
+      wait-for-v8:
+        description: >-
+          The Nix system of the runner (e.g. aarch64-darwin). When set on a pull request that
+          does not change the V8 build, wait for the base branch to put V8 in the binary cache
+          instead of rebuilding it. Not compatible with extra-nix-flags that affect V8.
+        required: false
+        type: string
+        default: ''
     secrets:
       CACHIX_AUTH_TOKEN:
         description: Cachix auth token for nodejs.cachix.org.
@@ -38,7 +46,105 @@ env:
   FLAKY_TESTS: keep_retrying
 
 jobs:
+  # When a commit changing the V8 build lands on the base branch, its push run
+  # needs hours to rebuild V8 and put it in the binary cache. Until then, every
+  # pull request run would rebuild that very same V8. This job waits for the
+  # base branch instead, on a runner that is cheaper than the one doing the build.
+  wait-for-v8:
+    if: inputs.wait-for-v8 != '' && github.event_name == 'pull_request'
+    name: Wait for V8
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    permissions:
+      contents: read
+      actions: read  # To check whether the base branch has a run in progress.
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          path: tarballs
+          pattern: '*.tar.gz'
+          merge-multiple: true
+
+      - name: Extract tarball
+        shell: bash
+        run: |
+          tar xzf tarballs/*.tar.gz -C "$RUNNER_TEMP"
+          echo "TAR_DIR=$RUNNER_TEMP/$(basename tarballs/*.tar.gz .tar.gz)" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b  # v31.11.3
+
+      - name: Wait for V8 if the base branch is building it
+        shell: bash
+        env:
+          SYSTEM: ${{ inputs.wait-for-v8 }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          GH_TOKEN: ${{ github.token }}
+          MAX_WAIT: 18000  # 5 hours
+          INTERVAL: 120
+        run: |
+          v8_store_path() {
+            nix-store -q --outputs "$(
+              nix-instantiate --option system "$SYSTEM" \
+                -E "(import $1/tools/nix/ci-shell.nix {}).v8Derivation"
+            )"
+          }
+          is_cached() {
+            [ "$(curl -ISsw "%{http_code}" -o /dev/null "https://nodejs.cachix.org/$(basename "${1%-v8-*}").narinfo")" = "200" ]
+          }
+          # Whether a push run of the calling workflow has yet to complete on the base branch.
+          # If we cannot tell, assume there is one.
+          base_branch_is_building() {
+            local workflow=${WORKFLOW_REF%@*}
+            local pending
+            pending=$(
+              gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/${workflow##*/}/runs" \
+                -f branch="$BASE_REF" -f event=push -f per_page=50 \
+                --jq '[.workflow_runs[] | select(.status != "completed")] | length'
+            ) || return 0
+            [ "$pending" != "0" ]
+          }
+
+          V8_STORE_PATH=$(v8_store_path "$TAR_DIR")
+          if is_cached "$V8_STORE_PATH"; then
+            echo "$V8_STORE_PATH is in the binary cache."
+            exit 0
+          fi
+
+          # Same edit as the one made by the Makefile $(TARBALL) target, so we don't need git.
+          sed -i 's/fileset = fileset.intersection (fileset.gitTracked root)/fileset =/' base/tools/nix/v8.nix
+          BASE_V8_STORE_PATH=$(v8_store_path "$GITHUB_WORKSPACE/base")
+          if [ "$V8_STORE_PATH" != "$BASE_V8_STORE_PATH" ]; then
+            echo "This pull request changes the V8 build, nobody else is going to build $V8_STORE_PATH."
+            exit 0
+          fi
+
+          echo "::notice title=Waiting for V8::The base branch needs the same V8 ($V8_STORE_PATH) and it is not in the binary cache yet."
+          until is_cached "$V8_STORE_PATH"; do
+            if [ "$SECONDS" -ge "$MAX_WAIT" ]; then
+              echo "::warning title=V8 did not show up::Gave up after ${SECONDS}s, building it from source."
+              exit 0
+            fi
+            sleep "$INTERVAL"
+            if ! base_branch_is_building; then
+              # The last run may have put V8 in the binary cache right before completing.
+              is_cached "$V8_STORE_PATH" && break
+              echo "::warning title=Nobody is building V8::No push run is in progress on $BASE_REF, building it from source."
+              exit 0
+            fi
+          done
+          echo "$V8_STORE_PATH showed up in the binary cache after ${SECONDS}s."
+
   build:
+    needs: wait-for-v8
+    # Run even when wait-for-v8 is skipped or fails: at worst, we build V8 ourselves.
+    if: ${{ !cancelled() }}
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
