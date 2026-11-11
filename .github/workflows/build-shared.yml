@@ -82,8 +82,8 @@ jobs:
         shell: bash
         env:
           SYSTEM: ${{ inputs.wait-for-v8 }}
-          MAX_WAIT: 18000  # 5 hours
-          INTERVAL: 120
+          MAX_WAIT: 180
+          INTERVAL: 30
         run: |
           v8_store_path() {
             nix-store -q --outputs "$(
@@ -124,6 +124,7 @@ jobs:
     # Run even when wait-for-v8 is skipped or fails: at worst, we build V8 ourselves.
     if: ${{ !cancelled() }}
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 10
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
