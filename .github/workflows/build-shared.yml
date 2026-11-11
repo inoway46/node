@@ -1,3 +1,4 @@
+# ci/v8-wait: fork-only test, not for upstream.
 name: Build Node.js (shared libraries)
 
 on:
