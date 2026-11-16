@@ -1,0 +1,92 @@
+# Fork-only validation; do not include in upstream PR.
+name: Validate v24 macOS nullability fix
+on:
+  push:
+    branches: [ci/v24-macos-nullability]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.15'
+  XCODE_VERSION: '26.6'
+  FLAKY_TESTS: keep_retrying
+
+permissions:
+  contents: read
+
+jobs:
+  test-macOS:
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+    runs-on: macos-latest
+    env:
+      CC: ${{ (github.base_ref == 'main' || github.ref_name == 'main') && 'sccache' || '' }} gcc
+      CXX: ${{ (github.base_ref == 'main' || github.ref_name == 'main') && 'sccache' || '' }} g++
+      SCCACHE_GHA_ENABLED: ${{ github.base_ref == 'main' || github.ref_name == 'main' }}
+      SCCACHE_IDLE_TIMEOUT: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          path: node
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Set up Xcode ${{ env.XCODE_VERSION }}
+        run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app
+      - name: Set up sccache
+        if: github.base_ref == 'main' || github.ref_name == 'main'
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+        with:
+          version: v0.17.0
+      # The `npm ci` for this step fails a lot as part of the Test step. Run it
+      # now so that we don't have to wait 2 hours for the Build step to pass
+      # first before that failure happens. (And if there's something about
+      # `make run-ci -j3` that is causing the failure and the failure doesn't
+      # happen anymore running this step here first, that's also useful
+      # information.)
+      - name: tools/doc/node_modules workaround
+        run: make -C node tools/doc/node_modules
+      # This is needed due to https://github.com/nodejs/build/issues/3878
+      - name: Cleanup
+        run: |
+          echo "::group::Free space before cleanup"
+          df -h
+          echo "::endgroup::"
+          echo "::group::Cleaned Files"
+
+          sudo rm -rf /Users/runner/Library/Android/sdk
+
+          echo "::endgroup::"
+          echo "::group::Free space after cleanup"
+          df -h
+          echo "::endgroup::"
+      - name: Build
+        id: build
+        run: make -C node build-ci -j$(getconf _NPROCESSORS_ONLN) V=1 CONFIG_FLAGS="--error-on-warn" 2>&1 | tee build.log
+      - name: Free Space After Build
+        run: df -h
+      - name: Test
+        id: test
+        run: make -C node test-ci -j1 V=1 TEST_CI_ARGS="-p actions --measure-flakiness 9" 2>&1 | tee test.log
+      - name: Re-run test in a folder whose name contains unusual chars
+        run: |
+          mv node "$DIR"
+          cd "$DIR"
+          ./tools/test.py --flaky-tests keep_retrying -p actions -j 4 2>&1 | tee ../unusual-path.log
+        env:
+          DIR: dir%20with $unusual"chars?'åß∂ƒ©∆¬…`
+      - name: Summary
+        if: always()
+        env:
+          BUILD_RESULT: ${{ steps.build.outcome }}
+          TEST_RESULT: ${{ steps.test.outcome }}
+        run: |
+          printf '| Build | Test |\n|---|---|\n| %s | %s |\n' "$BUILD_RESULT" "$TEST_RESULT" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: macos-validation-logs
+          path: '*.log'
+          retention-days: 7
