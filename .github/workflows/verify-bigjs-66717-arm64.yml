@@ -3,7 +3,7 @@ name: Verify big.js 66717 on macOS arm64
 on:
   # First push registers this fork-only workflow; builds require manual dispatch.
   push:
-    branches: [verify-v26-bigjs-arm64]
+    branches: [ci/verify-bigjs-66717-v26-latest]
     paths:
       - .github/workflows/verify-bigjs-66717-arm64.yml
   workflow_dispatch:
@@ -23,8 +23,8 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 330
     env:
-      BEFORE_SHA: f88c2f8ec6731cc1a898028edf7dc505ad17224d
-      AFTER_SHA: 77e8e5c7d9808d155fad3b2a1594826e94385a2f
+      BEFORE_SHA: d1a4cf7b23c607244e22357cb50695431c96b026
+      AFTER_SHA: 646df721fbe3a702580ffcbada080171f6fc0ba6
     steps:
       - name: Check out fork harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
