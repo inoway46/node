@@ -58,7 +58,8 @@ def run_tests(node_root, variant, revision, output):
             log += (exc.stderr or b'').decode(errors='replace')
         unknown_flag = re.search(
             r'(unknown|unrecognized) (command.line )?(flag|option)', log, re.I)
-        unreachable = (code == -signal.SIGABRT and
+        crash_signals = {-signal.SIGABRT, -signal.SIGTRAP, -signal.SIGILL}
+        unreachable = (code in crash_signals and
                        'unreachable code' in log.lower())
         passed = code == 0 and not unknown_flag
         expected_failure = variant == 'before' and unreachable and not unknown_flag
