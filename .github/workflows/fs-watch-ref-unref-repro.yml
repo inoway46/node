@@ -1,0 +1,59 @@
+# Fork-only experiment. Do not include this workflow or harness in an upstream PR.
+name: FSWatcher ref-unref reproduction
+on:
+  push:
+    branches: [codex/ci-fs-watch-ref-unref]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  NODE_NIGHTLY: v28.0.0-nightly20261119cdd06876da
+jobs:
+  repro:
+    if: github.repository == 'inoway46/node'
+    name: ${{ matrix.os }} / ${{ matrix.variant }} / ${{ matrix.mode }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, ubuntu-24.04]
+        variant: [before, after]
+        mode: [plain, load, metadata]
+    env:
+      VARIANT: ${{ matrix.variant }}
+      MODE: ${{ matrix.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch fixed baseline
+        run: git fetch --no-tags origin 50ba1ec6c2b33bf18f21958af500d9e0e8144c7f
+      - name: Download verified nightly
+        run: |
+          case "$RUNNER_OS/$RUNNER_ARCH" in
+            macOS/ARM64) file="node-${NODE_NIGHTLY}-darwin-arm64.tar.gz" ;;
+            Linux/X64) file="node-${NODE_NIGHTLY}-linux-x64.tar.xz" ;;
+            *) echo "Unexpected runner architecture"; exit 1 ;;
+          esac
+          base="https://nodejs.org/download/nightly/${NODE_NIGHTLY}"
+          cd "$RUNNER_TEMP"
+          curl --retry 3 -fsSLO "$base/$file"
+          curl --retry 3 -fsSL "$base/SHASUMS256.txt" > SHASUMS256.all
+          grep -F "  $file" SHASUMS256.all > SHASUMS256.txt
+          test "$(wc -l < SHASUMS256.txt | tr -d ' ')" = 1
+          shasum -a 256 -c SHASUMS256.txt
+          mkdir node
+          tar -xf "$file" -C node --strip-components=1
+          echo "NODE_BIN=$RUNNER_TEMP/node/bin/node" >> "$GITHUB_ENV"
+          node/bin/node --version
+      - name: Compare 1000 iterations
+        run: |
+          python3 tools/ci/fs-watch-ref-unref-repro.py \
+            --node "$NODE_BIN" --variant "$VARIANT" --mode "$MODE" --repeat 1000
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: watch-${{ matrix.os }}-${{ matrix.variant }}-${{ matrix.mode }}
+          path: watch-repro-results/
+          retention-days: 7
