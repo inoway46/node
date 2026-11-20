@@ -28,7 +28,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Fetch fixed baseline
-        run: git fetch --no-tags origin 50ba1ec6c2b33bf18f21958af500d9e0e8144c7f
+        run: git fetch --depth=1 --no-tags origin 50ba1ec6c2b33bf18f21958af500d9e0e8144c7f
       - name: Download verified nightly
         run: |
           case "$RUNNER_OS/$RUNNER_ARCH" in
