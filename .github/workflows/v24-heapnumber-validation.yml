@@ -1,0 +1,79 @@
+# Fork-only validation; do not include this workflow in the upstream PR.
+name: V24 HeapNumber before and after
+on:
+  push:
+    branches: [codex/ci-v24-heapnumber]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'inoway46/node'
+    name: ${{ matrix.variant }} / Linux x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: before
+            revision: 9f5bddc3376f24ca28b2fa50a9f9622410aa7d07
+          - variant: after
+            revision: e2b8a0c05d0fdc1fc8c8eb66a3aae8149f5937dd
+    env:
+      VARIANT: ${{ matrix.variant }}
+      REVISION: ${{ matrix.revision }}
+    steps:
+      - name: Check out validation tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: tooling
+          persist-credentials: false
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.revision }}
+          path: node
+          persist-credentials: false
+      - name: Record environment
+        run: |
+          mkdir -p results
+          {
+            printf 'variant=%s\nrevision=%s\n' "$VARIANT" "$REVISION"
+            git -C node rev-parse HEAD
+            uname -a
+            python3 --version
+            g++ --version
+            free -h
+          } | tee results/environment.txt
+          test "$(git -C node rev-parse HEAD)" = "$REVISION"
+      - name: Build d8 from the checked-out sources
+        working-directory: node
+        run: |
+          set -o pipefail
+          ./configure --enable-d8 2>&1 | tee ../results/configure.log
+          make -C out BUILDTYPE=Release -j4 d8 2>&1 | tee ../results/build.log
+          out/Release/d8 --version | tee ../results/version.txt
+      - name: Run regression and related Maglev tests
+        run: |
+          python3 tooling/.github/scripts/v24-heapnumber-validation.py \
+            node "$VARIANT" "$REVISION" results
+      - name: Publish test summary
+        if: always()
+        run: |
+          if [ -f results/summary.md ]; then
+            cat results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '## %s\n\nBuild or setup failed before tests. Revision: %s. See the logs artifact.\n' \
+              "$VARIANT" "$REVISION" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload environment, build logs and test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: v24-heapnumber-${{ matrix.variant }}
+          path: results/
+          retention-days: 7
+          if-no-files-found: error
