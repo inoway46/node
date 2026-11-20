@@ -1,0 +1,198 @@
+# Throwaway workflow for my fork only. Not part of any PR.
+#
+# Runs TARGET before and after a test-only fix, against two binaries:
+#   main - a Node.js nightly built from main
+#   v26  - v26.x-staging at V26_SHA, built here (no nightly exists for it)
+# and under three modes:
+#   plain    - normal parallelism, REPEAT runs
+#   load     - 4x oversubscribed with background CPU hogs, REPEAT runs
+#   coalesce - every http2.connect() goes through a TCP proxy that holds
+#              server->client bytes for COALESCE_MS and forwards them in one
+#              write, so the response HEADERS and the server's RST_STREAM
+#              always arrive in the same read. COALESCE_REPEAT runs with a
+#              short per-test timeout, because "before" is expected to hang.
+#
+# Branch layout this relies on: HEAD = this workflow, HEAD~1 = the fix,
+# HEAD~2 = upstream main (the "before" version of the test). The test file
+# on v26.x-staging is identical to the one at HEAD~2.
+name: Flake repro (http2-response-limits)
+
+on:
+  push:
+    branches:
+      - ci/flake-repro-http2-response-limits
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NODE_NIGHTLY: v28.0.0-nightly20261119cdd06876da
+  V26_SHA: 3fac84c03420035ef03f2c06c40af6da6d07777e
+  REPEAT: 1000
+  COALESCE_REPEAT: 50
+  COALESCE_MS: 100
+  COALESCE_TIMEOUT: 20
+  TARGET: test/parallel/test-http2-max-session-memory-response-limits.js
+
+jobs:
+  build-v26:
+    name: build v26.x-staging / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: nodejs/node
+          ref: ${{ env.V26_SHA }}
+          persist-credentials: false
+      - name: Build
+        run: |
+          ./configure
+          make -j"$(getconf _NPROCESSORS_ONLN)"
+          out/Release/node --version
+          out/Release/node -p process.versions.nghttp2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: node-v26-${{ matrix.os }}
+          path: out/Release/node
+          retention-days: 7
+
+  repro:
+    name: ${{ matrix.target }} / ${{ matrix.os }} / ${{ matrix.variant }} / ${{ matrix.mode }}
+    needs: build-v26
+    # Run the main jobs even if a v26 build failed.
+    if: ${{ !cancelled() }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [main, v26]
+        os: [macos-latest, ubuntu-latest]
+        variant: [before, after]
+        mode: [plain, load, coalesce]
+    env:
+      BIN_TARGET: ${{ matrix.target }}
+      VARIANT: ${{ matrix.variant }}
+      MODE: ${{ matrix.mode }}
+      MATRIX_OS: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: ci
+          fetch-depth: 3
+          persist-credentials: false
+
+      # The v26 binary is tested with the test/ and tools/ trees it was
+      # built from.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: matrix.target == 'v26'
+        with:
+          repository: nodejs/node
+          ref: ${{ env.V26_SHA }}
+          path: v26
+          persist-credentials: false
+
+      - name: Download Node.js nightly
+        if: matrix.target == 'main'
+        run: |
+          case "$RUNNER_OS" in
+            macOS) file="node-${NODE_NIGHTLY}-darwin-arm64.tar.gz" ;;
+            Linux) file="node-${NODE_NIGHTLY}-linux-x64.tar.xz" ;;
+          esac
+          base="https://nodejs.org/download/nightly/${NODE_NIGHTLY}"
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "$base/$file"
+          curl -fsSL "$base/SHASUMS256.txt" | grep "  ${file}\$" > SHASUMS256.txt
+          shasum -a 256 -c SHASUMS256.txt
+          mkdir node
+          tar -xf "$file" -C node --strip-components=1
+          echo "NODE_BIN=$RUNNER_TEMP/node/bin/node" >> "$GITHUB_ENV"
+          echo "TREE=$GITHUB_WORKSPACE/ci" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        if: matrix.target == 'v26'
+        with:
+          name: node-v26-${{ matrix.os }}
+          path: ${{ runner.temp }}/node-v26
+
+      - name: Use the v26.x-staging build
+        if: matrix.target == 'v26'
+        run: |
+          chmod +x "$RUNNER_TEMP/node-v26/node"
+          echo "NODE_BIN=$RUNNER_TEMP/node-v26/node" >> "$GITHUB_ENV"
+          echo "TREE=$GITHUB_WORKSPACE/v26" >> "$GITHUB_ENV"
+
+      - name: Prepare test file
+        run: |
+          "$NODE_BIN" --version
+          cd ci
+          cp "$TARGET" "$RUNNER_TEMP/after.js"
+          git show "HEAD~2:$TARGET" > "$RUNNER_TEMP/before.js"
+          if cmp -s "$RUNNER_TEMP/before.js" "$RUNNER_TEMP/after.js"; then
+            echo "HEAD~2 and HEAD have the same $TARGET; check the branch layout"; exit 1
+          fi
+          if [ "$BIN_TARGET" = v26 ] && ! cmp -s "$RUNNER_TEMP/before.js" "$TREE/$TARGET"; then
+            echo "$TARGET on v26.x-staging differs from HEAD~2"; exit 1
+          fi
+          cp "$RUNNER_TEMP/$VARIANT.js" "$TREE/$TARGET"
+          if [ "$MODE" = coalesce ]; then
+            PRELOAD="$GITHUB_WORKSPACE/ci/.github/flake-repro/coalesce-preload.js" \
+              perl -0pi -e 's/^(\x27use strict\x27;\n)/$1require(\x27$ENV{PRELOAD}\x27);\n/ or die "use strict not found\n"' "$TREE/$TARGET"
+          fi
+          head -5 "$TREE/$TARGET"
+
+      - name: Start background CPU load
+        if: matrix.mode == 'load'
+        run: |
+          n=$(getconf _NPROCESSORS_ONLN)
+          for _ in $(seq $((n * 2))); do
+            nohup yes > /dev/null 2>&1 &
+          done
+          echo "started $((n * 2)) CPU hogs on $n cores"
+
+      - name: Run test
+        run: |
+          cd "$TREE"
+          n=$(getconf _NPROCESSORS_ONLN)
+          jobs=$n
+          repeat=$REPEAT
+          extra=()
+          if [ "$MODE" = load ]; then jobs=$((n * 4)); fi
+          if [ "$MODE" = coalesce ]; then
+            repeat=$COALESCE_REPEAT
+            extra=(--timeout="$COALESCE_TIMEOUT")
+          fi
+          set +e
+          python3 tools/test.py --shell="$NODE_BIN" --repeat="$repeat" -j "$jobs" -p tap "${extra[@]}" "$TARGET" > "$GITHUB_WORKSPACE/result.tap" 2>&1
+          status=$?
+          set -e
+          cd "$GITHUB_WORKSPACE"
+          pass=$(grep -c '^ok ' result.tap || true)
+          fail=$(grep -c '^not ok ' result.tap || true)
+          timeouts=$(grep -c 'TIMEOUT' result.tap || true)
+          {
+            echo "| target | os | variant | mode | jobs | pass | fail | timeouts |"
+            echo "|---|---|---|---|---|---|---|---|"
+            echo "| $BIN_TARGET | $MATRIX_OS | $VARIANT | $MODE | $jobs | $pass | $fail | $timeouts |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "RESULT target=$BIN_TARGET variant=$VARIANT mode=$MODE pass=$pass fail=$fail timeouts=$timeouts (exit $status)"
+          if [ "$fail" -gt 0 ]; then
+            echo "::group::First failure"
+            awk '/^not ok /{p=1} p{print; if (++c > 40) exit}' result.tap
+            echo "::endgroup::"
+          fi
+          exit "$status"
+
+      - name: Upload TAP log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: tap-${{ matrix.target }}-${{ matrix.os }}-${{ matrix.variant }}-${{ matrix.mode }}
+          path: result.tap
+          retention-days: 7
