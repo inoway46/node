@@ -1,0 +1,121 @@
+# Fork-only validation; do not include in the upstream PR.
+name: Verify v22 macOS 15
+
+on:
+  push:
+    branches: [codex/ci-v22-macos-15]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.14'
+  XCODE_VERSION: '16.1'
+  FLAKY_TESTS: keep_retrying
+
+permissions:
+  contents: read
+
+jobs:
+  test-macOS:
+    if: github.repository == 'inoway46/node'
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+    runs-on: macos-15
+    env:
+      CC: ${{ (github.base_ref == 'main' || github.ref_name == 'main') && 'sccache' || '' }} gcc
+      CXX: ${{ (github.base_ref == 'main' || github.ref_name == 'main') && 'sccache' || '' }} g++
+      SCCACHE_GHA_ENABLED: ${{ github.base_ref == 'main' || github.ref_name == 'main' }}
+      SCCACHE_IDLE_TIMEOUT: '0'
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+        with:
+          persist-credentials: false
+          path: node
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548  # v6.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Set up Xcode ${{ env.XCODE_VERSION }}
+        run: sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION}.app"
+      - name: Set up sccache
+        if: github.base_ref == 'main' || github.ref_name == 'main'
+        uses: Mozilla-Actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad  # v0.0.9
+        with:
+          version: v0.12.0
+      # The `npm ci` for this step fails a lot as part of the Test step. Run it
+      # now so that we don't have to wait 2 hours for the Build step to pass
+      # first before that failure happens. (And if there's something about
+      # `make run-ci -j3` that is causing the failure and the failure doesn't
+      # happen anymore running this step here first, that's also useful
+      # information.)
+      - name: tools/doc/node_modules workaround
+        run: make -C node tools/doc/node_modules
+      # This is needed due to https://github.com/nodejs/build/issues/3878
+      - name: Cleanup
+        run: |
+          echo "::group::Free space before cleanup"
+          df -h
+          echo "::endgroup::"
+          echo "::group::Cleaned Files"
+
+          sudo rm -rf /Users/runner/Library/Android/sdk
+
+          echo "::endgroup::"
+          echo "::group::Free space after cleanup"
+          df -h
+          echo "::endgroup::"
+      - name: Record environment
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/validation-logs"
+          {
+            sw_vers
+            uname -m
+            xcodebuild -version
+            clang --version
+            python3 --version
+            git -C node rev-parse HEAD
+          } 2>&1 | tee "$GITHUB_WORKSPACE/validation-logs/environment.log"
+      - name: Build
+        id: build
+        run: make -C node build-ci -j"$(getconf _NPROCESSORS_ONLN)" V=1 CONFIG_FLAGS="--error-on-warn" 2>&1 | tee "$GITHUB_WORKSPACE/validation-logs/build.log"
+      - name: Free Space After Build
+        run: df -h
+      - name: Test
+        id: test
+        run: make -C node test-ci -j1 V=1 TEST_CI_ARGS="-p actions --measure-flakiness 9" 2>&1 | tee "$GITHUB_WORKSPACE/validation-logs/test.log"
+      - name: Re-run test in a folder whose name contains unusual chars
+        id: unusual
+        run: |
+          mv node "$DIR"
+          cd "$DIR"
+          ./tools/test.py --flaky-tests keep_retrying -p actions -j 4 2>&1 | tee "$GITHUB_WORKSPACE/validation-logs/unusual-path.log"
+        env:
+          DIR: dir%20with $unusual"chars?'åß∂ƒ©∆¬…`
+      - name: Summarize results
+        if: always()
+        env:
+          BUILD_RESULT: ${{ steps.build.outcome }}
+          TEST_RESULT: ${{ steps.test.outcome }}
+          UNUSUAL_RESULT: ${{ steps.unusual.outcome }}
+        run: |
+          {
+            printf 'Commit: %s\n\n' "$GITHUB_SHA"
+            printf '| Check | Result |\n| --- | --- |\n'
+            printf '| Build | %s |\n' "$BUILD_RESULT"
+            printf '| test-ci | %s |\n' "$TEST_RESULT"
+            printf '| Unusual path tests | %s |\n' "$UNUSUAL_RESULT"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4  # v5.0.0
+        with:
+          name: v22-macos-15-logs
+          path: validation-logs/
+          retention-days: 7
