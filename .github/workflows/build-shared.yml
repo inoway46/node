@@ -62,6 +62,48 @@ jobs:
           name: nodejs
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
+      - name: Check whether Cachix has the macOS V8 build
+        id: v8
+        if: runner.os == 'macOS' && github.event_name == 'pull_request'
+        env:
+          HAS_CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN && 'true' }}
+        run: |
+          # Jobs with write access can already share their builds through Cachix.
+          if [ "$HAS_CACHIX_AUTH_TOKEN" = true ]; then exit 0; fi
+          drv=$(nix-instantiate "$TAR_DIR/tools/nix/ci-shell.nix" -A v8Derivation)
+          out=$(nix-store --query --outputs "$drv")
+          name=${out##*/}
+          if ! curl -fsSI -o /dev/null "https://nodejs.cachix.org/${name%%-*}.narinfo"; then
+            echo "drv=$drv" >> "$GITHUB_OUTPUT"
+            echo "key=test-shared-v8-$RUNNER_ARCH-$name" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        id: restore-v8
+        if: steps.v8.outputs.key
+        with:
+          path: libv8-macos.nar
+          key: ${{ steps.v8.outputs.key }}
+
+      - name: Import cached V8
+        if: steps.restore-v8.outputs.cache-hit == 'true'
+        run: |
+          nix-store --import < libv8-macos.nar || echo "::warning::Could not import V8. Nix will build it if needed."
+
+      - name: Build V8 for this pull request
+        if: steps.v8.outputs.key && steps.restore-v8.outputs.cache-hit != 'true'
+        env:
+          V8_DRV: ${{ steps.v8.outputs.drv }}
+        run: |
+          out=$(nix-build --no-out-link "$V8_DRV")
+          nix-store --export "$out" > libv8-macos.nar
+
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        if: steps.v8.outputs.key && steps.restore-v8.outputs.cache-hit != 'true'
+        with:
+          path: libv8-macos.nar
+          key: ${{ steps.v8.outputs.key }}
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         if: inputs.v8-nar
         with:
