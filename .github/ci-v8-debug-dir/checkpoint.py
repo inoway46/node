@@ -15,7 +15,7 @@ with open("build.log", "w") as log, subprocess.Popen(
         progress = re.search(r"\[(\d+)/(\d+)\]", line)
         if progress and not stopped:
             done, total = map(int, progress.groups())
-            if 800 <= done < total and total >= 1000:
+            if 500 <= done < total and total >= 1000:
                 build.send_signal(signal.SIGINT)
                 stopped = True
     status = build.wait()
