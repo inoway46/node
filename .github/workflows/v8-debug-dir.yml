@@ -1,13 +1,13 @@
 # Fork-only experiment; not for upstream.
-name: V8 ccache with DWARF
+name: V8 partial ccache
 
 on:
   push:
-    branches: [ci/v8-debug-compilation-dir]
-  workflow_dispatch:
+    branches: [ci/v8-ccache-checkpoint]
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build-tarball:
@@ -39,9 +39,3 @@ jobs:
     uses: ./.github/workflows/v8-debug-dir-build.yml
     with:
       warm: false
-
-  warm:
-    needs: cold
-    uses: ./.github/workflows/v8-debug-dir-build.yml
-    with:
-      warm: true

@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build:
@@ -22,10 +23,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 2
           sparse-checkout: .github/ci-v8-debug-dir
+
+      - name: Locate the successful checkpoint run
+        id: checkpoint
+        if: inputs.warm
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          parent=$(git rev-parse HEAD^)
+          id=$(gh run list --repo "$GITHUB_REPOSITORY" --branch ci/v8-ccache-checkpoint --commit "$parent" --workflow v8-debug-dir.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          test -n "$id"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
+          run-id: ${{ steps.checkpoint.outputs.id || github.run_id }}
+          github-token: ${{ github.token }}
           pattern: '*.tar.gz'
           path: tarballs
           merge-multiple: true
@@ -51,15 +66,16 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         if: inputs.warm
         with:
+          run-id: ${{ steps.checkpoint.outputs.id }}
+          github-token: ${{ github.token }}
           name: v8-debug-dir-cold
           path: reference
 
-      - name: Restore compiler cache and change the derivation
+      - name: Restore the partial compiler cache
         if: inputs.warm
         run: |
           zstd -dc reference/cache.tar.zst | tar xf - -C "$CACHE_DIR"
           sudo chmod -R a+rwX "$CACHE_DIR"
-          echo '# Fork-only: cause a different V8 derivation.' >> "$TAR_DIR/configure.py"
 
       - name: Check DWARF and measure the V8 build
         run: bash .github/ci-v8-debug-dir/measure.sh
@@ -71,7 +87,7 @@ jobs:
           sudo chmod -R a+rX "$CACHE_DIR"
           tar cf - -C "$CACHE_DIR" . | zstd -T0 -1 -o reference/cache.tar.zst
           echo "Compressed compiler cache: $(wc -c < reference/cache.tar.zst) bytes" >> "$GITHUB_STEP_SUMMARY"
-          cp cold.sha256 reference/
+          cp stats.txt reference/cold-stats.txt
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         if: ${{ !inputs.warm }}
@@ -87,7 +103,8 @@ jobs:
         with:
           name: v8-debug-dir-${{ env.PHASE }}-measurements
           path: |
-            *.sha256
+            live-stats.txt
+            libraries.txt
             stats.txt
             build.log
             dwarf.txt

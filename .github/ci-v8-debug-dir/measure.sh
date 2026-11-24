@@ -16,7 +16,20 @@ if [[ "$PHASE" == cold ]]; then
 fi
 "$ccache_bin" --zero-stats
 start=$SECONDS
-out=$("${build[@]}" -A v8 2> >(tee build.log >&2))
+if [[ "$PHASE" == cold ]]; then
+  python3 .github/ci-v8-debug-dir/checkpoint.py "${build[@]}" -A v8
+else
+  (while :; do
+    "$ccache_bin" --print-stats > live-stats.tmp
+    mv live-stats.tmp live-stats.txt
+    sleep 60
+  done) &
+  monitor=$!
+  trap 'kill "$monitor" 2>/dev/null || true' EXIT
+  out=$("${build[@]}" -A v8 2> >(tee build.log >&2))
+  test -s "$out/lib/pkgconfig/v8.pc"
+  ls "$out"/lib/*.a > libraries.txt
+fi
 elapsed=$((SECONDS - start))
 "$ccache_bin" --print-stats > stats.txt
 hits=$(awk '$1 == "direct_cache_hit" || $1 == "preprocessed_cache_hit" { hits += $2 } END { print hits+0 }' stats.txt)
@@ -24,18 +37,7 @@ misses=$(awk '$1 == "cache_miss" { print $2 }' stats.txt)
 printf '| Phase | V8 (s) | Hits | Misses |\n|---|---:|---:|---:|\n| %s | %d | %d | %d |\n' \
   "$PHASE" "$elapsed" "$hits" "$misses" >> "$GITHUB_STEP_SUMMARY"
 
-# Ignore only the expected difference in v8.pc's installation prefix.
-(
-  cd "$out"
-  find . -type f | LC_ALL=C sort | while IFS= read -r file; do
-    if [[ "$file" == ./lib/pkgconfig/v8.pc ]]; then
-      sed "s|^prefix=$out$|prefix=@out@|" "$file" | shasum -a 256 | sed "s|  -$|  $file|"
-    else
-      shasum -a 256 "$file"
-    fi
-  done
-) > "$PHASE.sha256"
 if [[ "$PHASE" == warm ]]; then
-  diff -u reference/cold.sha256 warm.sha256
-  test "$hits" -gt 0
+  awk -v h="$hits" -v m="$misses" 'BEGIN {printf "Hit rate: %.1f%% (%d hits, %d misses)\n", 100*h/(h+m ? h+m : 1),h,m}' >> "$GITHUB_STEP_SUMMARY"
 fi
+test "$misses" -gt 0 || test "$PHASE" = warm
