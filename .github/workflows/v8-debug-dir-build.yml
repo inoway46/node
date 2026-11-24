@@ -41,12 +41,12 @@ jobs:
             sandbox = true
             extra-sandbox-paths = ${{ env.CACHE_DIR }}
 
+      - name: Prepare sandbox cache
+        run: sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0777 "$CACHE_DIR"
+
       - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866  # v17
         with:
           name: nodejs
-
-      - name: Prepare sandbox cache
-        run: sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0777 "$CACHE_DIR"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         if: inputs.warm
