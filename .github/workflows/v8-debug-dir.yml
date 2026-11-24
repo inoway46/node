@@ -10,32 +10,7 @@ permissions:
   actions: read
 
 jobs:
-  build-tarball:
-    name: Build slim tarball
-    timeout-minutes: 360
-    runs-on: ubuntu-slim
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Make tarball
-        run: |
-          DATESTRING=$(date "+%Y-%m-%d")
-          COMMIT=$(git rev-parse --short=10 "$GITHUB_SHA")
-          export DATESTRING COMMIT
-          ./configure && make tar -j4 SKIP_XZ=1 SKIP_SHARED_DEPS=1 GZIP_COMPRESSION=6
-        env:
-          DISTTYPE: nightly
-
-      - name: Upload tarball artifact
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
-        with:
-          path: '*.tar.gz'
-          archive: false
-
-  cold:
-    needs: build-tarball
+  resume:
     uses: ./.github/workflows/v8-debug-dir-build.yml
     with:
-      warm: false
+      warm: true
