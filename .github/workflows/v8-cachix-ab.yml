@@ -1,0 +1,164 @@
+# Fork-only Cachix hit experiment.
+name: V8 Cachix hit overhead
+on:
+  push:
+    branches: [ci/v8-cachix-hit-ab]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  FLAKY_TESTS: keep_retrying
+jobs:
+  build-tarball:
+    name: Build slim tarball
+    timeout-minutes: 360
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Make tarball
+        run: |
+          DATESTRING=$(date "+%Y-%m-%d")
+          COMMIT=$(git rev-parse --short=10 "$GITHUB_SHA")
+          export DATESTRING COMMIT
+          ./configure && make tar -j4 SKIP_XZ=1 SKIP_SHARED_DEPS=1 GZIP_COMPRESSION=6
+        env:
+          DISTTYPE: nightly
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          path: '*.tar.gz'
+          archive: false
+
+  measure:
+    needs: build-tarball
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        trial: [1, 2, 3]
+        runner: [macos-latest, macos-15-intel]
+        variant: [baseline, proposed]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          path: tarballs
+          pattern: '*.tar.gz'
+          merge-multiple: true
+
+      - name: Extract tarball
+        shell: bash
+        run: |
+          tar xzf tarballs/*.tar.gz -C "$RUNNER_TEMP"
+          echo "TAR_DIR=$RUNNER_TEMP/$(basename tarballs/*.tar.gz .tar.gz)" >> "$GITHUB_ENV"
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b  # v31.11.3
+        with:
+          extra_nix_config: sandbox = true
+
+      - name: Build Cachix
+        if: ${{ matrix.runner == 'macos-15-intel' }}
+        id: build_cachix
+        run: |
+          nix-build --no-out-link -I "nixpkgs=$TAR_DIR/tools/nix/pkgs.nix" -E '(import <nixpkgs> {}).cachix'
+          {
+            printf "BIN="
+            nix-instantiate --eval --raw -I "nixpkgs=$TAR_DIR/tools/nix/pkgs.nix" -E 'with (import <nixpkgs> {});lib.getExe cachix'
+            printf '\n'
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866  # v17
+        with:
+          name: nodejs
+          cachixBin: ${{ steps.build_cachix.outputs.BIN || '' }}
+
+      - name: Start common timer
+        run: date +%s > start
+
+      - name: Evaluate the V8 derivation and query Cachix
+        if: matrix.variant == 'proposed'
+        run: |
+          drv=$(nix-instantiate "$TAR_DIR/tools/nix/ci-shell.nix" -A v8Derivation)
+          out=$(nix-store --query --outputs "$drv")
+          name=${out##*/}
+          curl -fsSI -o /dev/null "https://nodejs.cachix.org/${name%%-*}.narinfo"
+          echo "$out" > expected
+
+      - name: Configure sccache
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        with:
+          script: |
+            core.exportVariable('SCCACHE_GHA_ENABLED', 'on');
+            core.exportVariable('ACTIONS_CACHE_SERVICE_V2', 'on');
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+            core.exportVariable('NIX_SCCACHE', '(import <nixpkgs> {}).sccache');
+
+      - name: Measure arrival at the Node.js build
+        shell: bash
+        run: |
+          # Expand TAR_DIR inside the pure Nix shell.
+          # shellcheck disable=SC2016
+          nix-shell \
+            -I "nixpkgs=$TAR_DIR/tools/nix/pkgs.nix" \
+            --pure --keep TAR_DIR --keep FLAKY_TESTS \
+            --keep SCCACHE_GHA_ENABLED --keep ACTIONS_CACHE_SERVICE_V2 --keep ACTIONS_RESULTS_URL --keep ACTIONS_RUNTIME_TOKEN \
+            --arg ccache "${NIX_SCCACHE:-null}" \
+            --arg pkcs11 false \
+            --run '
+                date +%s > "$TAR_DIR/build-start"
+            ' "$TAR_DIR/tools/nix/ci-shell.nix" 2> >(tee nix.log >&2)
+
+      - name: Verify substitution and record result
+        env:
+          SAMPLE: ${{ matrix.runner }}_${{ matrix.variant }}_${{ matrix.trial }}
+        run: |
+          out=$(sed -nE "s/.*copying path '([^']*\/[^/']*-v8-[0-9][^']*)' from 'https:\/\/nodejs[.]cachix[.]org[^']*'.*/\1/p" nix.log | grep -v -- '-pkg-config-only' | sort -u)
+          test -n "$out"
+          test "$(echo "$out" | wc -l)" -eq 1
+          if [ -f expected ]; then test "$(cat expected)" = "$out"; fi
+          seconds=$(( $(cat "$TAR_DIR/build-start") - $(cat start) ))
+          printf '%s %s %s\n' "$SAMPLE" "$seconds" "$out" > "$SAMPLE.txt"
+          cat "$SAMPLE.txt" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: sample-${{ matrix.runner }}-${{ matrix.variant }}-${{ matrix.trial }}
+          path: ${{ matrix.runner }}_${{ matrix.variant }}_${{ matrix.trial }}.txt
+          retention-days: 7
+  summarize:
+    needs: measure
+    timeout-minutes: 360
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: sample-*
+          merge-multiple: true
+      - name: Compare three samples per variant
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          from statistics import median
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as report:
+              print("| Runner | Baseline (s) | Proposed (s) | Difference of medians (s) |", file=report)
+              print("|---|---|---|---|", file=report)
+              for runner in ("macos-latest", "macos-15-intel"):
+                  times = {}
+                  paths = set()
+                  for variant in ("baseline", "proposed"):
+                      times[variant] = []
+                      for trial in (1, 2, 3):
+                          sample = f"{runner}_{variant}_{trial}"
+                          label, sec, path = Path(f"{sample}.txt").read_text().split()
+                          assert label == sample
+                          paths.add(path)
+                          times[variant].append(int(sec))
+                  assert len(paths) == 1, paths
+                  delta = median(times["proposed"]) - median(times["baseline"])
+                  print(f"| {runner} | {times['baseline']} | {times['proposed']} | {delta:+} |", file=report)
