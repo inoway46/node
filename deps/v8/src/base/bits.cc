@@ -109,3 +109,5 @@ int64_t SignedSaturatedSub64(int64_t lhs, int64_t rhs) {
 }  // namespace bits
 }  // namespace base
 }  // namespace v8
+
+// v8-nar-invalidated-ARM64
