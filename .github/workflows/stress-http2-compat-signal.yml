@@ -1,0 +1,128 @@
+# Throwaway workflow for my fork only. Not part of any PR.
+#
+# Builds node from this branch (the change touches lib/, so a nightly binary
+# cannot run the new test), then runs each test in TESTS REPEAT times under
+# two modes:
+#   plain - parallelism equal to the number of cores
+#   load  - 4x oversubscribed with background CPU hogs
+#
+# The first test is the one added by the change. The second is an existing
+# test with a similar shape (many servers in one file), used as a control.
+name: Stress (http2-compat-signal)
+
+on:
+  push:
+    branches:
+      - ci/stress-http2-compat-signal
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: '3.15'
+  XCODE_VERSION: '16.4'
+  CLANG_VERSION: '19'
+  REPEAT: 1000
+  TESTS: >-
+    test/parallel/test-http2-compat-serverrequest-signal.js
+    test/parallel/test-http2-compat-serverresponse-end.js
+  SCCACHE_GHA_ENABLED: 'true'
+  SCCACHE_IDLE_TIMEOUT: '0'
+
+jobs:
+  stress:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            cc: sccache gcc
+            cxx: sccache g++
+          - os: ubuntu-24.04
+            cc: sccache clang-19
+            cxx: sccache clang++-19
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+      OS_NAME: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Clang ${{ env.CLANG_VERSION }}
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/install-clang
+        with:
+          clang-version: ${{ env.CLANG_VERSION }}
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
+
+      - name: Set up Xcode ${{ env.XCODE_VERSION }}
+        if: runner.os == 'macOS'
+        run: sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION}.app"
+
+      - name: Set up sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+        with:
+          version: v0.19.0
+
+      - name: Build node
+        run: |
+          ./configure
+          make -j"$(getconf _NPROCESSORS_ONLN)" node
+          out/Release/node --version
+
+      - name: Run tests ${{ env.REPEAT }} times
+        run: |
+          n=$(getconf _NPROCESSORS_ONLN)
+          {
+            echo "| os | test | mode | jobs | pass | fail |"
+            echo "|---|---|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for mode in plain load; do
+            jobs=$n
+            hogs=""
+            if [ "$mode" = load ]; then
+              jobs=$((n * 4))
+              for _ in $(seq $((n * 2))); do
+                yes > /dev/null 2>&1 &
+                hogs="$hogs $!"
+              done
+              echo "started $((n * 2)) CPU hogs on $n cores"
+            fi
+            for target in $TESTS; do
+              name=$(basename "$target" .js)
+              out="result-$name-$mode.tap"
+              python3 tools/test.py --shell=out/Release/node --repeat="$REPEAT" -j "$jobs" -p tap "$target" > "$out" 2>&1 || true
+              pass=$(grep -c '^ok ' "$out" || true)
+              fail=$(grep -c '^not ok ' "$out" || true)
+              echo "| $OS_NAME | $name | $mode | $jobs | $pass | $fail |" >> "$GITHUB_STEP_SUMMARY"
+              echo "RESULT os=$OS_NAME test=$name mode=$mode jobs=$jobs pass=$pass fail=$fail"
+              if [ "$fail" -gt 0 ]; then
+                echo "::group::First failure ($name, $mode)"
+                awk '/^not ok /{p=1} p{print; if (++c > 40) exit}' "$out"
+                echo "::endgroup::"
+              fi
+            done
+            if [ -n "$hogs" ]; then
+              # shellcheck disable=SC2086
+              kill $hogs || true
+            fi
+          done
+
+      - name: Upload TAP logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: tap-${{ matrix.os }}
+          path: result-*.tap
+          retention-days: 7
